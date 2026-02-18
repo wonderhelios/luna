@@ -1,7 +1,6 @@
 pub mod language;
 pub mod namespace;
 pub mod scope_resolution;
-pub mod utils;
 
 pub use {
     language::{Language, MemoizedQuery, TSLanguage, TSLanguageConfig, ALL_LANGUAGES},
@@ -9,11 +8,7 @@ pub use {
     scope_resolution::{NodeKind, ScopeGraph},
 };
 
-pub use core::definition::Definition;
-
-use core::code_chunk::CodeChunkMiddle;
 use scope_resolution::ResolutionMethod;
-use std::collections::BTreeSet;
 use tree_sitter::{Parser, Tree};
 
 /// A tree-sitter representation of a file
@@ -68,9 +63,7 @@ impl<'a> TreeSitterFile<'a> {
         })
     }
 
-    pub fn hoverable_ranges(
-        self,
-    ) -> Result<Vec<core::text_range::TextRange>, TreeSitterFileError> {
+    pub fn hoverable_ranges(self) -> Result<Vec<core::text_range::TextRange>, TreeSitterFileError> {
         let query = self
             .language
             .hoverable_query
@@ -95,30 +88,5 @@ impl<'a> TreeSitterFile<'a> {
         let root_node = self.tree.root_node();
 
         Ok(ResolutionMethod::Generic.build_scope(query, root_node, self.src, self.language))
-    }
-
-    pub fn filemap(self) -> Result<String, TreeSitterFileError> {
-        let root_node = self.tree.root_node();
-        (self.language.filemap)(&root_node, self.src, None).map_err(TreeSitterFileError::QueryError)
-    }
-
-    pub fn get_definition(
-        self,
-        rows: &[usize],
-        paths: &str,
-    ) -> Result<(String, Vec<Definition>), TreeSitterFileError> {
-        let root_node = self.tree.root_node();
-        (self.language.get_definition)(&root_node, self.src, rows, paths)
-            .map_err(TreeSitterFileError::QueryError)
-    }
-
-    pub fn get_completed_body_by_chunks(
-        self,
-        chunks: &Vec<CodeChunkMiddle>,
-        result: &mut String,
-    ) -> Result<(), TreeSitterFileError> {
-        let _definition_symbols = BTreeSet::<String>::new();
-        (self.language.complete_chunks)(&self.tree.root_node(), self.src, chunks, result)
-            .map_err(TreeSitterFileError::QueryError)
     }
 }

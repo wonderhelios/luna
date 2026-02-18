@@ -1,6 +1,5 @@
 mod c;
 mod c_sharp;
-mod cobol;
 mod cpp;
 mod go;
 mod java;
@@ -11,9 +10,6 @@ mod r;
 mod ruby;
 mod rust;
 mod typescript;
-use core::code_chunk::CodeChunkMiddle;
-pub use core::definition::Definition;
-use tree_sitter::Node;
 
 #[cfg(test)]
 mod test_utils;
@@ -36,7 +32,6 @@ pub static ALL_LANGUAGES: &[&TSLanguageConfig] = &[
     &ruby::RUBY,
     &r::R,
     &php::PHP,
-    &cobol::COBOL,
 ];
 
 /// A generic language wrapper type.
@@ -50,10 +45,6 @@ pub enum Language<Config: 'static> {
     Unsupported,
 }
 
-pub struct FileMapOptions {
-    pub include_using: bool,
-    pub include_fns: Vec<(String, String)>,
-}
 /// Languages based on tree-sitter grammars
 #[derive(Debug)]
 pub struct TSLanguageConfig {
@@ -76,28 +67,6 @@ pub struct TSLanguageConfig {
     /// Namespaces defined by this language,
     /// E.g.: type namespace, variable namespace, function namespace
     pub namespaces: NameSpaces,
-
-    /// Function to map source file to a filemap
-    pub filemap: fn(
-        node: &Node,
-        code: &[u8],
-        opt: Option<FileMapOptions>,
-    ) -> Result<String, tree_sitter::QueryError>,
-
-    /// Get the definitions of function
-    pub get_definition: fn(
-        node: &Node,
-        code: &[u8],
-        rows: &[usize],
-        path: &str,
-    ) -> Result<(String, Vec<Definition>), tree_sitter::QueryError>,
-
-    pub complete_chunks: fn(
-        node: &Node,
-        code: &[u8],
-        chunks: &Vec<CodeChunkMiddle>,
-        result: &mut String,
-    ) -> Result<(), tree_sitter::QueryError>,
 }
 
 #[derive(Debug)]
@@ -152,7 +121,7 @@ impl TSLanguage {
 mod tests {
 
     use super::*;
-    use crate::intelligence::NameSpaceMethods;
+    use crate::NameSpaceMethods;
 
     use std::collections::HashSet;
 

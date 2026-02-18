@@ -638,10 +638,9 @@ fn scope_res_generic(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        intelligence::SymbolId,
-        text_range::{Point, TextRange},
-    };
+    use crate::SymbolId;
+    use core::text_range::{Point, TextRange};
+
     use expect_test::expect;
 
     const DUMMY_LANG_ID: usize = 0;

@@ -2,7 +2,7 @@ pub use expect_test::expect;
 
 use std::collections::HashSet;
 
-use crate::intelligence::{scope_resolution::NodeKind, Language, TreeSitterFile};
+use crate::{scope_resolution::NodeKind, Language, TreeSitterFile};
 
 use expect_test::Expect;
 
@@ -56,7 +56,7 @@ pub fn test_scopes(lang_id: &str, src: &[u8], expected: Expect) {
     expected.assert_debug_eq(&observed)
 }
 
-pub fn build_graph(lang_id: &str, src: &[u8]) -> crate::intelligence::ScopeGraph {
+pub fn build_graph(lang_id: &str, src: &[u8]) -> crate::ScopeGraph {
     let tsf = TreeSitterFile::try_build(src, lang_id).unwrap();
     tsf.scope_graph().unwrap()
 }

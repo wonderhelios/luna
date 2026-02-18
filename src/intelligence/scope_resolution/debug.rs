@@ -1,7 +1,8 @@
 use std::fmt;
 
 use super::{EdgeKind, LocalDef, NodeKind};
-use crate::{intelligence::TSLanguageConfig, text_range::TextRange};
+use crate::TSLanguageConfig;
+use core::text_range::TextRange;
 
 use petgraph::{
     graph::{Graph, NodeIndex},

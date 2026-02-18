@@ -37,7 +37,7 @@ pub static RUST: TSLanguageConfig = TSLanguageConfig {
 
 #[cfg(test)]
 mod tests {
-    use crate::intelligence::language::test_utils::*;
+    use crate::language::test_utils::*;
 
     #[test]
     fn declare_const_and_static() {
