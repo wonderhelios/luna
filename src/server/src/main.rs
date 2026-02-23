@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use tokenizers::{Tokenizer, models::wordlevel::WordLevel, pre_tokenizers::whitespace::Whitespace};
 
 fn demo_tokenizer() -> Tokenizer {
-    // Demo 用极简 tokenizer（真实场景应复用 embedder 的 tokenizer）
+    // Demo minimalist tokenizer (real scenarios should reuse embedder's tokenizer)
     let mut vocab = AHashMap::new();
     vocab.insert("[UNK]".to_string(), 0u32);
     vocab.insert("fn".to_string(), 1u32);
@@ -33,14 +33,20 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// 运行内置 demo（演示解析/切分/最小 search+refill 闭环）
+    /// Run built-in demo (demonstrate parsing/chunking/minimal search+refill loop)
     Demo,
-    /// 在 repo_root 下进行关键词占位检索，并输出 IndexChunk 命中与 Refill 后的 ContextChunk
+    /// Perform keyword placeholder search under repo_root, output IndexChunk hits and Refilled ContextChunk
     Search {
-        /// 仓库根目录
+        /// Repository root directory
         repo_root: PathBuf,
-        /// 查询关键词（可多词）
+        /// Search keywords (multiple words allowed)
         query: Vec<String>,
+        /// Additionally output context text for LLM injection
+        #[arg(long)]
+        prompt: bool,
+        /// Maximum number of ContextChunks in prompt output (default: 8)
+        #[arg(long, default_value_t = 8)]
+        max_chunks: usize,
     },
 }
 
@@ -48,14 +54,24 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command.unwrap_or(Command::Demo) {
         Command::Demo => cmd_demo(),
-        Command::Search { repo_root, query } => cmd_search(repo_root, query),
+        Command::Search {
+            repo_root,
+            query,
+            prompt,
+            max_chunks,
+        } => cmd_search(repo_root, query, prompt, max_chunks),
     }
 }
 
-fn cmd_search(repo_root: PathBuf, query: Vec<String>) -> Result<()> {
+fn cmd_search(
+    repo_root: PathBuf,
+    query: Vec<String>,
+    prompt: bool,
+    max_chunks: usize,
+) -> Result<()> {
     let query = query.join(" ");
     if query.trim().is_empty() {
-        anyhow::bail!("query 不能为空（示例：luna-server search . index_chunks）");
+        anyhow::bail!("query cannot be empty (example: luna-server search . index_chunks)");
     }
     let tok = demo_tokenizer();
 
@@ -70,7 +86,7 @@ fn cmd_search(repo_root: PathBuf, query: Vec<String>) -> Result<()> {
 
     println!("Query: {query}\n");
     println!(
-        "说明：\n  - preview: 只展示 snippet 的第一行（便于扫一眼）\n  - trace: 工具调用摘要\n  - Hits: 关键词命中的索引块（IndexChunk，可能是同一函数内的多个碎片命中）\n  - ContextChunks: Refill 后的语义上下文块（ContextChunk，已按范围去重，适合后续注入 LLM）\n"
+        "Note:\n  - preview: only first line of snippet (for quick overview)\n  - trace: tool call summary\n  - Hits: keyword-matched index chunks (IndexChunk, possibly multiple fragments in same function)\n  - ContextChunks: refilled semantic context blocks (ContextChunk, deduped by range, ready for LLM injection)\n"
     );
     for t in &pack.trace {
         println!("[trace] {:?}: {}", t.tool, t.summary);
@@ -115,13 +131,25 @@ fn cmd_search(repo_root: PathBuf, query: Vec<String>) -> Result<()> {
         println!("  ... ({} context chunks total)", pack.context.len());
     }
 
+    if prompt {
+        let rendered = agent::render_prompt_context(
+            &repo_root,
+            &pack,
+            &tok,
+            agent::ContextEngineOptions {
+                max_chunks,
+                ..Default::default()
+            },
+        )?;
+        println!("\n---\nPROMPT CONTEXT\n---\n{}", rendered);
+    }
     Ok(())
 }
 
 fn cmd_demo() -> Result<()> {
     println!("Luna Intelligence Demo\n");
 
-    // 1. 准备一段测试代码 (Rust)
+    // 1. Prepare test code (Rust)
     let code = r#"
     fn add(a: i32, b: i32) -> i32 {
         return a + b;
@@ -135,17 +163,17 @@ fn cmd_demo() -> Result<()> {
 
     println!(" Analyzing Source Code:\n---\n{}\n---", code);
 
-    // 2. 使用 Intelligence 模块进行解析
-    // "Rust" 是语言 ID，对应 xc-intelligence 内部的注册
+    // 2. Parse using Intelligence module
+    // "Rust" is language ID, corresponding to internal registration in xc-intelligence
     let ts_file = TreeSitterFile::try_build(code.as_bytes(), "Rust")
         .map_err(|e| anyhow::anyhow!("Failed to parse: {:?}", e))?;
 
-    // 3. 获取 Scope Graph (核心能力：理解作用域、定义和引用)
+    // 3. Get Scope Graph (core capability: understand scopes, definitions, and references)
     let scope_graph = ts_file
         .scope_graph()
         .map_err(|e| anyhow::anyhow!("Failed to build scope graph: {:?}", e))?;
 
-    // 4. 打印所有识别到的符号 (定义)
+    // 4. Print all detected symbols (definitions)
     println!("\n Detected Symbols (Definitions):");
     let symbols = scope_graph.symbols();
 
@@ -166,7 +194,7 @@ fn cmd_demo() -> Result<()> {
         }
     }
 
-    // 5. 智能切分 Demo（用于后续 Index/RAG/上下文注入）
+    // 5. Intelligent Chunking Demo (for subsequent Index/RAG/context injection)
     println!("\n Semantic Chunks (Top-level scopes):");
     let chunks = chunk_source("mem.rs", code.as_bytes(), "Rust", ChunkOptions::default())
         .map_err(|e| anyhow::anyhow!("Failed to chunk: {e}"))?;
@@ -184,7 +212,7 @@ fn cmd_demo() -> Result<()> {
         println!("    ... ({} chunks total)", chunks.len());
     }
 
-    // 6. IndexChunk -> Refill -> ContextChunk Demo（调用 agent 的最小闭环）
+    // 6. IndexChunk -> Refill -> ContextChunk Demo (calling agent's minimal loop)
     println!("\n Search+Refill (M1 minimal loop):");
     let tok = demo_tokenizer();
     let pack = agent::build_context_pack_keyword(
