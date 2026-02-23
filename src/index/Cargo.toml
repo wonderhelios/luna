@@ -4,3 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+core = {path = "../core"}
+intelligence = { path = "../intelligence"}
+petgraph = {version = "0.6.4", default-features = false}
+tokenizers = "0.21"
+ahash = "0.8"
