@@ -48,6 +48,15 @@ enum Command {
         #[arg(long, default_value_t = 8)]
         max_chunks: usize,
     },
+    /// Assemble the context based on the search+refill+context engine and call LLM to provide the answer
+    Ask {
+        repo_root: PathBuf,
+        question: Vec<String>,
+        #[arg(long)]
+        show_prompt: bool,
+        #[arg(long, default_value_t = 8)]
+        max_chunks: usize,
+    },
 }
 
 fn main() -> Result<()> {
@@ -60,7 +69,90 @@ fn main() -> Result<()> {
             prompt,
             max_chunks,
         } => cmd_search(repo_root, query, prompt, max_chunks),
+        Command::Ask {
+            repo_root,
+            question,
+            show_prompt,
+            max_chunks,
+        } => cmd_ask(repo_root, question, show_prompt, max_chunks),
     }
+}
+
+fn cmd_ask(
+    repo_root: PathBuf,
+    question: Vec<String>,
+    show_prompt: bool,
+    max_chunks: usize,
+) -> Result<()> {
+    let question = question.join(" ");
+    if question.trim().is_empty() {
+        anyhow::bail!("question can not be empty");
+    }
+    let tok = demo_tokenizer();
+    let search_query = {
+        let mut out = Vec::new();
+        let mut cur = String::new();
+        for ch in question.chars() {
+            if ch.is_ascii_alphanumeric() || ch == '_' {
+                cur.push(ch);
+            } else if !cur.is_empty() {
+                out.push(std::mem::take(&mut cur));
+            }
+        }
+        if !cur.is_empty() {
+            out.push(cur);
+        }
+        let out = out
+            .into_iter()
+            .filter(|s| {
+                s.chars()
+                    .next()
+                    .map(|c| c.is_ascii_alphabetic() || c == '_')
+                    .unwrap_or(false)
+            })
+            .collect::<Vec<_>>();
+        if out.is_empty() {
+            question.clone()
+        } else {
+            out.join(" ")
+        }
+    };
+
+    let (hits, mut trace) = agent::search_code_keyword(
+        &repo_root,
+        &search_query,
+        &tok,
+        IndexChunkOptions::default(),
+        agent::SearchCodeOptions::default(),
+    )?;
+
+    let (context, mut trace2) = agent::refill_hits(&repo_root, &hits, RefillOptions::default())?;
+    trace.append(&mut trace2);
+    let pack = agent::ContextPack {
+        query: question.clone(),
+        hits,
+        context,
+        trace,
+    };
+
+    let prompt_context = agent::render_prompt_context(
+        &repo_root,
+        &pack,
+        &tok,
+        agent::ContextEngineOptions {
+            max_chunks,
+            ..Default::default()
+        },
+    )?;
+
+    if show_prompt {
+        println!("---\nPROMPT CONTEXT\n---\n{prompt_context}\n");
+    }
+
+    let cfg = agent::LLMConfig::from_env()?;
+    let ans = agent::llm_answer(&cfg, &question, &prompt_context)?;
+    println!("---\nANSWER\n---\n{}", ans.trim());
+    Ok(())
 }
 
 fn cmd_search(

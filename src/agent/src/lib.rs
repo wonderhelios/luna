@@ -5,7 +5,7 @@ use intelligence::{ALL_LANGUAGES, TreeSitterFile};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::{fs, str};
+use std::{env, fs, str};
 use tokenizers::Tokenizer;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -365,6 +365,130 @@ pub fn render_prompt_context(
         out.push_str("```\n\n");
     }
     Ok(out)
+}
+
+// LLm Config
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LLMConfig {
+    pub api_base: String,
+    pub api_key: String,
+    pub model: String,
+    pub temperature: f32,
+}
+
+impl Default for LLMConfig {
+    fn default() -> Self {
+        Self {
+            api_base: "https://open.bigmodel.cn/api/paas/v4/".to_string(),
+            api_key: String::new(),
+            model: "glm-4-flash".to_string(),
+            temperature: 0.2,
+        }
+    }
+}
+
+impl LLMConfig {
+    /// read config from env
+    pub fn from_env() -> Result<Self> {
+        let mut cfg = Self::default();
+        if let Ok(v) = env::var("LLM_API_BASE") {
+            if !v.trim().is_empty() {
+                cfg.api_base = v;
+            }
+        }
+        if let Ok(v) = env::var("LLM_MODEL") {
+            if !v.trim().is_empty() {
+                cfg.model = v;
+            }
+        }
+        cfg.api_key = env::var("LLM_API_KEY")
+            .map_err(|_| anyhow::anyhow!("missing environment var: LLM_API_KEY"))?;
+        if cfg.api_key.trim().is_empty() {
+            anyhow::bail!("LLM_API_KEY is empty!");
+        }
+        Ok(cfg)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ChatMessage {
+    role: String,
+    content: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ChatCompletionRequest {
+    model: String,
+    messages: Vec<ChatMessage>,
+    temperature: f32,
+    stream: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ChatCompletionResponse {
+    choices: Vec<ChatChoice>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ChatChoice {
+    message: ChatMessage,
+}
+
+/// Minimal LLM call: send context and question to model for answer
+/// TODO(wonder): streaming output
+pub fn llm_answer(cfg: &LLMConfig, question: &str, prompt_context: &str) -> Result<String> {
+    let system = r#"You are a senior software engineer assistant. You can only answer based on the provided Retrieved Context.
+- Do not fabricate non-existent files/functions/line numbers.
+- If you need to cite, please use the form `path:start..end` and try to cite specific line numbers.
+- If the context is insufficient to answer, please clearly state what information is missing and suggest using search/refill to retrieve it."#;
+
+    let user = format!(
+        "{}\n\n# User Question\n\n{}\n",
+        prompt_context,
+        question.trim()
+    );
+
+    let req = ChatCompletionRequest {
+        model: cfg.model.clone(),
+        messages: vec![
+            ChatMessage {
+                role: "system".to_string(),
+                content: system.to_string(),
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: user,
+            },
+        ],
+        temperature: cfg.temperature,
+        stream: false,
+    };
+
+    let url = format!("{}/chat/completions", cfg.api_base.trim_end_matches('/'));
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .build()?;
+
+    let resp = client
+        .post(url)
+        .bearer_auth(cfg.api_key.clone())
+        .json(&req)
+        .send()?;
+
+    let status = resp.status();
+    let text = resp.text().unwrap_or_default();
+    if !status.is_success() {
+        anyhow::bail!("LLM request failed: status={} body={}", status, text);
+    }
+    let parsed: ChatCompletionResponse = serde_json::from_str(&text)
+        .map_err(|e| anyhow::anyhow!("LLM response parses error: {e}; body={}", text))?;
+    let content = parsed
+        .choices
+        .get(0)
+        .map(|c| c.message.content.clone())
+        .unwrap_or_default();
+
+    Ok(content)
 }
 
 fn select_context_chunks(
