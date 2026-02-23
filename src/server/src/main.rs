@@ -1,8 +1,10 @@
 use ahash::AHashMap;
 use anyhow::Result;
+use clap::{Parser, Subcommand};
 use core::code_chunk::{ChunkOptions, IndexChunkOptions, RefillOptions};
-use index::{chunk_source, index_chunks, refill_chunks};
+use index::chunk_source;
 use intelligence::TreeSitterFile;
+use std::path::PathBuf;
 use tokenizers::{Tokenizer, models::wordlevel::WordLevel, pre_tokenizers::whitespace::Whitespace};
 
 fn demo_tokenizer() -> Tokenizer {
@@ -22,7 +24,101 @@ fn demo_tokenizer() -> Tokenizer {
     tok
 }
 
+#[derive(Debug, Parser)]
+#[command(name = "luna-server", about = "Luna server CLI (M1)")]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// 运行内置 demo（演示解析/切分/最小 search+refill 闭环）
+    Demo,
+    /// 在 repo_root 下进行关键词占位检索，并输出 IndexChunk 命中与 Refill 后的 ContextChunk
+    Search {
+        /// 仓库根目录
+        repo_root: PathBuf,
+        /// 查询关键词（可多词）
+        query: Vec<String>,
+    },
+}
+
 fn main() -> Result<()> {
+    let cli = Cli::parse();
+    match cli.command.unwrap_or(Command::Demo) {
+        Command::Demo => cmd_demo(),
+        Command::Search { repo_root, query } => cmd_search(repo_root, query),
+    }
+}
+
+fn cmd_search(repo_root: PathBuf, query: Vec<String>) -> Result<()> {
+    let query = query.join(" ");
+    if query.trim().is_empty() {
+        anyhow::bail!("query 不能为空（示例：luna-server search . index_chunks）");
+    }
+    let tok = demo_tokenizer();
+
+    let pack = agent::build_context_pack_keyword(
+        &repo_root,
+        &query,
+        &tok,
+        agent::SearchCodeOptions::default(),
+        IndexChunkOptions::default(),
+        RefillOptions::default(),
+    )?;
+
+    println!("Query: {query}\n");
+    println!(
+        "说明：\n  - preview: 只展示 snippet 的第一行（便于扫一眼）\n  - trace: 工具调用摘要\n  - Hits: 关键词命中的索引块（IndexChunk，可能是同一函数内的多个碎片命中）\n  - ContextChunks: Refill 后的语义上下文块（ContextChunk，已按范围去重，适合后续注入 LLM）\n"
+    );
+    for t in &pack.trace {
+        println!("[trace] {:?}: {}", t.tool, t.summary);
+    }
+
+    println!("\nHits: {}", pack.hits.len());
+    for (i, h) in pack.hits.iter().take(8).enumerate() {
+        let lines = h.end_line.saturating_sub(h.start_line) + 1;
+        println!(
+            "  [H{:02}] {}:{}..={} ({} lines) bytes {}..{} preview={}",
+            i,
+            h.path,
+            h.start_line + 1,
+            h.end_line + 1,
+            lines,
+            h.start_byte,
+            h.end_byte,
+            h.text.lines().next().unwrap_or("").trim()
+        );
+    }
+    if pack.hits.len() > 8 {
+        println!("  ... ({} hits total)", pack.hits.len());
+    }
+
+    println!("\nContextChunks (deduped): {}", pack.context.len());
+    for c in pack.context.iter().take(8) {
+        let lines = c.end_line.saturating_sub(c.start_line) + 1;
+        let bytes = c.snippet.len();
+        println!(
+            "  #{:02} {}:{}..={} ({} lines, {} bytes) reason={} preview={}",
+            c.alias,
+            c.path,
+            c.start_line + 1,
+            c.end_line + 1,
+            lines,
+            bytes,
+            c.reason,
+            c.snippet.lines().next().unwrap_or("").trim()
+        );
+    }
+    if pack.context.len() > 8 {
+        println!("  ... ({} context chunks total)", pack.context.len());
+    }
+
+    Ok(())
+}
+
+fn cmd_demo() -> Result<()> {
     println!("Luna Intelligence Demo\n");
 
     // 1. 准备一段测试代码 (Rust)
@@ -88,54 +184,40 @@ fn main() -> Result<()> {
         println!("    ... ({} chunks total)", chunks.len());
     }
 
-    // 6. IndexChunk -> Refill -> ContextChunk Demo
-    println!("\n IndexChunks (hybrid: scopes + token budget):");
+    // 6. IndexChunk -> Refill -> ContextChunk Demo（调用 agent 的最小闭环）
+    println!("\n Search+Refill (M1 minimal loop):");
     let tok = demo_tokenizer();
-    let idx_chunks = index_chunks(
-        "",
-        "mem.rs",
-        code.as_bytes(),
-        "Rust",
+    let pack = agent::build_context_pack_keyword(
+        PathBuf::from(".").as_path(),
+        "fn add",
         &tok,
-        IndexChunkOptions::default(),
+        agent::SearchCodeOptions {
+            max_files: 200,
+            max_hits: 16,
+            ..Default::default()
+        },
+        IndexChunkOptions {
+            min_chunk_tokens: 1,
+            max_chunk_tokens: 64,
+            ..Default::default()
+        },
+        RefillOptions::default(),
+    )?;
+    println!(
+        "    hits={} context={}",
+        pack.hits.len(),
+        pack.context.len()
     );
-    for (i, c) in idx_chunks.iter().take(4).enumerate() {
+    for c in pack.context.iter().take(2) {
         println!(
-            "    [I{:02}] lines {}..={} bytes {}..{} preview={}",
-            i,
+            "    #{:02} {}:{}..={} reason={} preview={}",
+            c.alias,
+            c.path,
             c.start_line + 1,
             c.end_line + 1,
-            c.start_byte,
-            c.end_byte,
-            c.text.lines().next().unwrap_or("").trim()
+            c.reason,
+            c.snippet.lines().next().unwrap_or("").trim()
         );
-    }
-    let hit = idx_chunks
-        .iter()
-        .find(|c| c.text.contains("add(1, 2)"))
-        .or_else(|| idx_chunks.first())
-        .cloned();
-
-    if let Some(hit) = hit {
-        println!("\n Refill hit -> ContextChunk:");
-        let ctx = refill_chunks(
-            "mem.rs",
-            code.as_bytes(),
-            "Rust",
-            &[hit],
-            RefillOptions::default(),
-        )
-        .map_err(|e| anyhow::anyhow!("Failed to refill: {e}"))?;
-        for c in ctx {
-            println!(
-                "    #{:02} lines {}..={} reason={} preview={}",
-                c.alias,
-                c.start_line + 1,
-                c.end_line + 1,
-                c.reason,
-                c.snippet.lines().next().unwrap_or("").trim()
-            );
-        }
     }
 
     println!("\n Demo finished successfully.");

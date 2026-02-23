@@ -4,3 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+core = {path = "../core"}
+index = {path = "../index"}
+intelligence = {path = "../intelligence"}
+anyhow = "1.0"
+serde = {version = "1.0", features = ["derive"]}
+tokenizers = "0.21"

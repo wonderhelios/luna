@@ -3,11 +3,8 @@ use core::code_chunk::{
     ChunkOptions, CodeChunk, ContextChunk, IndexChunk, IndexChunkBuildError, IndexChunkOptions,
     RefillOptions,
 };
-use intelligence::NodeKind;
 use intelligence::TreeSitterFile;
 use intelligence::TreeSitterFileError;
-use intelligence::scope_resolution::EdgeKind;
-use petgraph::visit::EdgeRef;
 use std::fmt;
 use std::ops::Range;
 use tokenizers::Tokenizer;
@@ -27,11 +24,11 @@ impl fmt::Display for ChunkError {
 
 impl std::error::Error for ChunkError {}
 
-/// 基于 `luna/src/intelligence` 的 scope graph 进行“智能切分”。
+/// Intelligent chunking based on `luna/src/intelligence` scope graph.
 ///
-/// - 优先取“直接挂在 root scope 下”的 scope 作为语义块（通常对应函数/类/方法等）。
-/// - 如果某个 scope 过大，退化为行滑窗切分。
-/// - 如果找不到任何 top-level scope，则对全文件做滑窗。
+/// - Prioritizes scopes directly under root scope as semantic chunks (typically functions/classes/methods).
+/// - Falls back to sliding window by line for oversized scopes.
+/// - Falls back to full-file sliding window if no top-level scopes are found.
 pub fn chunk_source(
     path: &str,
     src: &[u8],
@@ -50,12 +47,12 @@ pub fn chunk_source(
         top_scopes.sort_by_key(|(_, r)| r.start.byte);
 
         for (_, range) in top_scopes {
-            // 空范围直接跳过
+            // Skip empty ranges
             if range.end.byte <= range.start.byte {
                 continue;
             }
 
-            // 超长 scope -> scope 内滑窗
+            // Oversized scope -> sliding window within scope
             if range.size() > opt.max_chunk_bytes {
                 chunks.extend(sliding_window_by_lines(
                     path,
@@ -80,7 +77,7 @@ pub fn chunk_source(
     }
 
     if chunks.is_empty() {
-        // 全局 fallback：按行滑窗覆盖全文件
+        // Global fallback: sliding window by line covering the entire file
         let total_lines = line_starts.len().saturating_sub(1);
         chunks = sliding_window_by_lines(
             path,
@@ -93,7 +90,7 @@ pub fn chunk_source(
         );
     }
 
-    // 统一 alias
+    // Normalize alias
     for (i, c) in chunks.iter_mut().enumerate() {
         c.alias = i;
     }
@@ -101,17 +98,17 @@ pub fn chunk_source(
     Ok(chunks)
 }
 
-/// 生成 IndexChunk（用于向量/关键词检索）。
+/// Generate IndexChunk (for vector/keyword retrieval).
 ///
-/// 切分策略（modern hybrid）：
-/// - 语义边界优先：优先按 top-level scope（函数/类/方法）生成候选块。
-/// - 预算归一化：仅对超长 scope 在 scope 内按 token 预算切分（优先 newline，其次 BPE 边界，必要时 overlap）。
-/// - 兜底：无 AST/解析失败时退化为全文件 token 切分；tokenizer 不可用再退化为按行切分。
+/// Chunking strategy (modern hybrid):
+/// - Semantic boundary first: prioritize top-level scopes (functions/classes/methods) for candidate chunks.
+/// - Budget normalization: only split oversized scopes within token budget (prioritize newline, then BPE boundaries, with overlap if necessary).
+/// - Fallback: degrade to full-file token chunking when no AST/parse failure; degrade to line-based chunking when tokenizer unavailable.
 ///
-/// 说明：
-/// - `repo` 用于把 `repo\tpath\n` 前缀计入 token 预算（可以传空字符串）。
-/// - `lang_id` 用于解析 top-level scope（例如 "Rust"）。
-/// - 若 tokenizer 编码失败，将降级为按行切分（`fallback_lines`）。
+/// Notes:
+/// - `repo` is used to account for `repo\tpath\n` prefix in token budget (can be empty string).
+/// - `lang_id` is used to parse top-level scopes (e.g., "Rust").
+/// - If tokenizer encoding fails, degrades to line-based chunking (`fallback_lines`).
 pub fn index_chunks(
     repo: &str,
     path: &str,
@@ -120,10 +117,10 @@ pub fn index_chunks(
     tokenizer: &Tokenizer,
     opt: IndexChunkOptions,
 ) -> Vec<IndexChunk> {
-    // modern hybrid：
-    // 1) 优先按 top-level scope 取“语义边界”（函数/类/方法等）
-    // 2) 在每个 scope 内再按 token 预算切分（超长才切），保证检索单元尺寸可控
-    // 3) 解析失败 / 无 scope 时，退化为全文件 token 切分；tokenizer 不可用则按行切分
+    // Modern hybrid strategy:
+    // 1) Prioritize top-level scopes for "semantic boundaries" (functions/classes/methods)
+    // 2) Split within each scope by token budget (only if oversized), ensuring controllable retrieval unit size
+    // 3) Fallback to full-file token chunking on parse failure/no scopes; fallback to line-based chunking if tokenizer unavailable
 
     let src = String::from_utf8_lossy(src);
 
@@ -135,7 +132,6 @@ pub fn index_chunks(
     let offsets_all = encoding.get_offsets();
     let ids_all = encoding.get_ids();
 
-    // remove trailing SEP-like token with (0,0) offsets (对齐 Kuaima)
     let offsets_len = offsets_all.len().saturating_sub(1);
     let offsets: &[(usize, usize)] = if offsets_all.get(offsets_len).map(|o| o.0) == Some(0) {
         &offsets_all[..offsets_len]
@@ -143,14 +139,14 @@ pub fn index_chunks(
         offsets_all
     };
 
-    // ids 用于 BPE 边界判断；长度与 offsets 不一致时，保守裁剪避免越界
+    // ids used for BPE boundary detection; conservative trimming to avoid out-of-bounds when lengths differ
     let ids_len = offsets.len().saturating_add(1).min(ids_all.len());
     let ids = &ids_all[..ids_len];
 
     let token_bounds = opt.min_chunk_tokens..opt.max_chunk_tokens;
     let min_tokens = token_bounds.start;
 
-    // 计算 `repo\tpath\n` 前缀 token 占用（用于预算扣减）
+    // Calculate `repo\tpath\n` prefix token usage (for budget deduction)
     let prefix = format!("{}\t{}\n", repo, path);
     let prefix_tokens = match tokenizer.encode(prefix, true) {
         Ok(e) => e,
@@ -162,7 +158,7 @@ pub fn index_chunks(
     }
     let max_tokens = token_bounds.end - DEDUCT_SPECIAL_TOKENS - prefix_len;
 
-    // 语义边界：top-level scopes
+    // Semantic boundaries: top-level scopes
     let top_scopes = TreeSitterFile::try_build(src.as_bytes(), lang_id)
         .and_then(|ts| ts.scope_graph())
         .ok()
@@ -172,7 +168,7 @@ pub fn index_chunks(
     let mut out = Vec::new();
 
     if !top_scopes.is_empty() {
-        // 以语义边界为主：每个 scope 内做 token 预算归一化（超长才切）
+        // Prioritize semantic boundaries: normalize token budget within each scope (split only if oversized)
         for (_, r) in top_scopes {
             if r.end.byte <= r.start.byte {
                 continue;
@@ -184,7 +180,7 @@ pub fn index_chunks(
             };
             let token_len = token_range.end.saturating_sub(token_range.start);
 
-            // scope 太小也保留：语义边界比 min_tokens 更重要（否则会漏掉小函数/小类）
+            // Keep small scopes: semantic boundaries take priority over min_tokens (otherwise small functions/classes would be missed)
             if token_len <= max_tokens {
                 if r.end.byte > r.start.byte {
                     out.push(make_index_chunk_by_bytes(
@@ -197,7 +193,7 @@ pub fn index_chunks(
                 continue;
             }
 
-            // scope 过大：在 scope 内按 token 预算切分
+            // Oversized scope: split within scope by token budget
             match by_tokens_in_token_range(
                 path,
                 &src,
@@ -211,7 +207,7 @@ pub fn index_chunks(
             ) {
                 Ok(mut chunks) => out.append(&mut chunks),
                 Err(_) => {
-                    // 极端情况下（例如 tokenizer/id 不匹配），退化为按行切分
+                    // Extreme cases (e.g., tokenizer/id mismatch), fallback to line-based chunking
                     out.extend(by_lines_index_chunks(path, &src, opt.fallback_lines));
                 }
             }
@@ -219,7 +215,7 @@ pub fn index_chunks(
     }
 
     if out.is_empty() {
-        // fallback：全文件 token 切分（对齐旧行为）
+        // Fallback: full-file token chunking (aligns with legacy behavior)
         let full = 0..offsets.len();
         match by_tokens_in_token_range(
             path,
@@ -285,7 +281,7 @@ fn by_tokens_in_token_range(
         {
             next_newline
         } else if let Some(next_boundary) = (start + max_boundary_tokens..next_limit).rfind(|&i| {
-            // ids 与 offsets 不同源时可能越界：越界则认为是边界
+            // ids and offsets from different sources may be out of bounds: treat as boundary
             ids.get(i + 1)
                 .and_then(|id| tokenizer.id_to_token(*id))
                 .is_none_or(|s| !s.starts_with("##"))
@@ -296,7 +292,7 @@ fn by_tokens_in_token_range(
         };
 
         let token_len = end_limit.saturating_sub(start);
-        // 末尾 chunk 允许小于 min_tokens：保证覆盖完整范围
+        // Allow tail chunk to be smaller than min_tokens: ensure full range coverage
         let allow_small = end_limit == offsets_last;
         if token_len >= min_tokens || allow_small {
             add_token_range(
@@ -314,7 +310,7 @@ fn by_tokens_in_token_range(
             return Ok(chunks);
         }
 
-        // overlap：计算新的 start token index（保证严格推进，避免死循环）
+        // Overlap: calculate new start token index (ensure strict progress, avoid infinite loop)
         let diff = strategy.next_subdivision(end_limit - start);
         let mut mid = start.saturating_add(diff);
         if mid >= end_limit {
@@ -345,7 +341,7 @@ fn by_tokens_in_token_range(
                 .unwrap_or(mid),
         };
 
-        // clamp 到 token_range
+        // Clamp to token_range
         if start < token_range.start {
             start = token_range.start;
         }
@@ -437,7 +433,6 @@ fn add_token_range(
         path: path.to_string(),
         start_byte,
         end_byte,
-        // 统一使用 0-based 行号；展示层再做 +1
         start_line: start.line,
         end_line: end.line,
         text: src[start_byte..end_byte].to_string(),
@@ -490,7 +485,6 @@ fn by_lines_index_chunks(path: &str, src: &str, size: usize) -> Vec<IndexChunk> 
                 path: path.to_string(),
                 start_byte,
                 end_byte,
-                // 统一使用 0-based 行号；end_line 为包含式
                 start_line: start_line0,
                 end_line: end_line0,
                 text: src[start_byte..end_byte].to_string(),
@@ -499,12 +493,11 @@ fn by_lines_index_chunks(path: &str, src: &str, size: usize) -> Vec<IndexChunk> 
         .collect()
 }
 
-/// 将检索命中的 IndexChunk 扩展为 ContextChunk（函数/类级上下文）。
+/// Expand retrieved IndexChunk hits into ContextChunk (function/class-level context).
 ///
-/// MVP：
-/// - 解析 scope graph
-/// - 找到“覆盖 hit 的最小 top-level scope”，输出对应范围
-/// - 若找不到，退化为命中行附近的行窗口
+/// - Parse scope graph
+/// - Find "minimum enclosing top-level scope covering hit", output corresponding range
+/// - Fallback to line window near hit line if not found
 pub fn refill_chunks(
     path: &str,
     src: &[u8],
@@ -524,7 +517,7 @@ pub fn refill_chunks(
         .unwrap_or_default();
 
     for hit in hits {
-        // 1) 优先：找最小 enclosing top-level scope
+        // Priority 1: find minimum enclosing top-level scope
         let mut best: Option<core::text_range::TextRange> = None;
         for (_, r) in &top_scopes {
             if r.start.byte <= hit.start_byte && r.end.byte >= hit.end_byte {
@@ -542,13 +535,12 @@ pub fn refill_chunks(
                 path: path.to_string(),
                 alias: 0,
                 snippet,
-                // 统一使用 0-based 行号；end_line 为包含式
                 start_line: r.start.line,
                 end_line: r.end.line,
                 reason: "refill from enclosing top-level scope".to_string(),
             }
         } else {
-            // 2) fallback：命中行附近窗口
+            // Fallback: line window near hit
             let hit_line0 = hit.start_line;
             let half = opt.fallback_window_lines / 2;
             let start0 = hit_line0.saturating_sub(half);
@@ -563,7 +555,6 @@ pub fn refill_chunks(
                 path: path.to_string(),
                 alias: 0,
                 snippet,
-                // 统一使用 0-based 行号；end_line 为包含式
                 start_line: start0,
                 end_line: end0,
                 reason: "refill fallback window".to_string(),
@@ -573,7 +564,7 @@ pub fn refill_chunks(
         out.push(chunk);
     }
 
-    // alias 连续化
+    // Normalize alias to be sequential
     for (i, c) in out.iter_mut().enumerate() {
         c.alias = i;
     }
@@ -593,7 +584,6 @@ fn make_chunk(
         path: path.to_string(),
         alias: 0,
         snippet,
-        // 统一使用 0-based 行号；end_line 用“包含式”更直观（若 end_line0 < start_line0 则纠正）
         start_line: start_line0,
         end_line: end_line0.max(start_line0),
     }
@@ -606,7 +596,7 @@ fn compute_line_starts(src: &[u8]) -> Vec<usize> {
             starts.push(i + 1);
         }
     }
-    // 末尾 sentinel：方便用 line -> byte range
+    // Trailing sentinel: facilitate line -> byte range conversion
     starts.push(src.len());
     starts
 }
@@ -617,7 +607,6 @@ fn byte_range_for_lines(
     end_line0: usize,
 ) -> (usize, usize) {
     let start = *line_starts.get(start_line0).unwrap_or(&0);
-    // end_line0 为包含式：取 end_line0+1 的起始 offset
     let end_line_exclusive = end_line0.saturating_add(1);
     let end = *line_starts
         .get(end_line_exclusive)
@@ -667,7 +656,7 @@ fn find_root_scope_idx(graph: &intelligence::ScopeGraph) -> Option<petgraph::gra
             continue;
         };
 
-        // root scope 没有 ScopeToScope 的出边
+        // Root scope has no ScopeToScope outgoing edges
         let has_parent = graph
             .graph
             .edges(idx)
