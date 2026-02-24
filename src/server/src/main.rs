@@ -63,6 +63,39 @@ enum Command {
         #[arg(long, default_value_t = 3)]
         max_steps: usize,
     },
+    /// List directory contents (Phase 3 tool test)
+    ListDir {
+        /// Directory path to list
+        path: PathBuf,
+    },
+    /// Test edit_file tool (Phase 3 tool test)
+    EditFile {
+        /// Path to the file to edit
+        path: PathBuf,
+        /// Start line (1-based)
+        #[arg(long)]
+        start: usize,
+        /// End line (1-based)
+        #[arg(long)]
+        end: usize,
+        /// New content to replace the lines with
+        #[arg(long)]
+        content: String,
+        /// Create backup before editing
+        #[arg(long)]
+        backup: bool,
+    },
+    /// Test run_terminal tool (Phase 3 tool test)
+    RunTerminal {
+        /// Command to run
+        command: Vec<String>,
+        /// Working directory
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+        /// Allow dangerous commands
+        #[arg(long)]
+        allow_dangerous: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -90,6 +123,19 @@ fn main() -> Result<()> {
             react,
             max_steps,
         ),
+        Command::ListDir { path } => cmd_list_dir(path),
+        Command::EditFile {
+            path,
+            start,
+            end,
+            content,
+            backup,
+        } => cmd_edit_file(path, start, end, content, backup),
+        Command::RunTerminal {
+            command,
+            cwd,
+            allow_dangerous,
+        } => cmd_run_terminal(command, cwd, allow_dangerous),
     }
 }
 
@@ -398,5 +444,98 @@ fn cmd_demo() -> Result<()> {
     }
 
     println!("\n Demo finished successfully.");
+    Ok(())
+}
+
+fn cmd_list_dir(path: PathBuf) -> Result<()> {
+    println!("Listing directory: {:?}\n", path);
+
+    let entries = agent::list_dir(&path)?;
+
+    if entries.is_empty() {
+        println!("(empty directory)");
+        return Ok(());
+    }
+
+    println!("{:<40} {:<10} {:<10}", "Name", "Type", "Size");
+    println!("{}", "-".repeat(60));
+
+    for entry in entries {
+        let type_str = if entry.is_dir {
+            "DIR"
+        } else if entry.is_file {
+            "FILE"
+        } else {
+            "OTHER"
+        };
+
+        let size_str = entry.size.map(|s| format!("{} B", s)).unwrap_or_else(|| "-".to_string());
+
+        println!("{:<40} {:<10} {:<10}", entry.name, type_str, size_str);
+    }
+
+    Ok(())
+}
+
+fn cmd_edit_file(path: PathBuf, start: usize, end: usize, content: String, backup: bool) -> Result<()> {
+    println!("Editing file: {:?}", path);
+    println!("Lines: {}..={}", start, end);
+    println!("Backup: {}", backup);
+    println!("\nNew content:\n{}\n", content);
+
+    let op = agent::EditOp::ReplaceLines {
+        start_line: start,
+        end_line: end,
+        new_content: content,
+    };
+
+    let result = agent::edit_file(&path, &op, backup)?;
+
+    println!("Result:");
+    println!("  Success: {}", result.success);
+    if let Some(error) = result.error {
+        println!("  Error: {}", error);
+    }
+    if let Some(lines) = result.lines_changed {
+        println!("  Lines changed: {}", lines);
+    }
+    if let Some(backup) = result.backup_path {
+        println!("  Backup: {}", backup);
+    }
+
+    Ok(())
+}
+
+fn cmd_run_terminal(command: Vec<String>, cwd: Option<PathBuf>, allow_dangerous: bool) -> Result<()> {
+    let cmd_str = command.join(" ");
+    println!("Running command: {}", cmd_str);
+    if let Some(dir) = &cwd {
+        println!("Working directory: {:?}", dir);
+    }
+    println!("Allow dangerous: {}", allow_dangerous);
+    println!();
+
+    let result = agent::run_terminal(&cmd_str, cwd.as_deref(), allow_dangerous)?;
+
+    println!("Result:");
+    println!("  Success: {}", result.success);
+    if let Some(code) = result.exit_code {
+        println!("  Exit code: {}", code);
+    }
+
+    if !result.stdout.is_empty() {
+        println!("\nStdout:");
+        println!("{}", result.stdout);
+    }
+
+    if !result.stderr.is_empty() {
+        println!("\nStderr:");
+        println!("{}", result.stderr);
+    }
+
+    if let Some(error) = result.error {
+        println!("\nError: {}", error);
+    }
+
     Ok(())
 }

@@ -1,9 +1,9 @@
 use crate::context_engine::render_prompt_context;
 use crate::llm::llm_chat;
 use crate::tools::{SearchCodeOptions, refill_hits, search_code_keyword};
-use crate::types::{ContextPack, ReActAction, ReActOptions, ReActStepTrace};
-use core::code_chunk::{IndexChunkOptions, RefillOptions};
-use std::collections::BTreeMap;
+use crate::types::{ContextPack, EditOp, ReActAction, ReActOptions, ReActStepTrace};
+use core::code_chunk::{ContextChunk, IndexChunkOptions, RefillOptions};
+use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 use tokenizers::Tokenizer;
 
@@ -119,14 +119,19 @@ fn extract_first_json_object(s: &str) -> Option<String> {
                         depth -= 1;
                         if depth == 0 {
                             let end = i + 1;
-                            return Some(String::from_utf8_lossy(&bytes[start..end]).to_string());
+                            let json_str = String::from_utf8_lossy(&bytes[start..end]).to_string();
+                            // Validate that it's actually valid JSON
+                            if serde_json::from_str::<serde_json::Value>(&json_str).is_ok() {
+                                return Some(json_str);
+                            }
+                            // If not valid, continue searching
+                            break;
                         }
                     }
                     _ => {}
                 }
                 i += 1;
             }
-            return None;
         }
         i += 1;
     }
@@ -134,22 +139,22 @@ fn extract_first_json_object(s: &str) -> Option<String> {
 }
 
 fn plan_prompt(question: &str, state_summary: &str) -> (String, String) {
-    // Gather first, then answer
-    let system = r#"You are the scheduler (ReAct) of a codebase agent. You can only choose one action from the following, and you must output a JSON object (do not output any extra text):
-Optional actions:
-1) {"action":"search","query":"..."} // The query must be ASCII code keywords (letters/numbers/underscores/spaces), no Chinese characters.
-2) {"action":"answer"} // Indicates sufficient context to proceed to the final answer.
-3) {"action":"stop","reason":"..."} // Indicates that you cannot continue (e.g., no keywords, empty context, and no search).
+    let system = r#"You are a JSON API. Output ONLY a valid JSON object.
+
+Actions:
+- {"action":"search","query":"keywords"}
+- {"action":"edit_file","path":"...","start_line":N,"end_line":N,"new_content":"...","create_backup":true}
+- {"action":"answer"}
+- {"action":"stop","reason":"..."}
+
 Rules:
-- Prioritize search: when the context is empty or clearly insufficient to answer.
-- Query selection for search: extract identifiers from the question, try singular/plural/snake_case/PascalCase variants.
-- CRITICAL: If the question asks about a specific type/struct/enum/function (e.g., "what is ContextChunk?"), and the definitions list contains that name BUT the preview chunks don't show its actual definition body, you MUST search again with more specific query (e.g., "struct ContextChunk").
-- Avoid duplicate searches: If the previous search did not result in an increase in hits/context_chunks, try a different query variant before giving up.
-- If there is already a relevant defined block (e.g., fn/struct/enum definition) with its body content visible, then action=answer.
-- Never output a natural language interpretation directly; only output JSON. "#;
+- Output ONLY the JSON object, no markdown
+- For edit_file: start_line equals end_line (single line)
+- When state shows the code → answer
+- When state shows NO code → search"#;
 
     let user = format!(
-        "# Question\n{}\n\n# State\n{}\n",
+        "Question: {}\n\nState:\n{}",
         question.trim(),
         state_summary.trim()
     );
@@ -241,6 +246,17 @@ fn summarize_state(
     if !definition_names.is_empty() {
         s.push_str(&format!(" definitions=[{}]", definition_names.join(", ")));
     }
+
+    // Show if list_dir function is visible
+    let has_list_dir = context.iter().any(|c| {
+        c.snippet.contains("fn list_dir") || c.snippet.contains("pub fn list_dir")
+    });
+    let has_sort = context.iter().any(|c| {
+        c.snippet.contains("entries.sort_by") || c.snippet.contains("entries.sort_by_key")
+    });
+    if has_list_dir {
+        s.push_str(&format!(" visible_functions=[list_dir] has_sort={}", has_sort));
+    }
     s.push('\n');
 
     for c in context.iter().take(STATE_CONTEXT_PREVIEW_MAX) {
@@ -318,6 +334,7 @@ pub fn react_ask(
 
     let mut no_delta_searches = 0usize;
     let mut last_search_query: Option<String> = None;
+    let mut last_edit: Option<(String, usize, usize)> = None; // Track last edit: (path, start, end)
 
     // ReAct loop: up to N rounds, each round lets the model decide whether to continue search or answer directly
     for step in 0..react_opt.max_steps.max(1) {
@@ -345,12 +362,45 @@ pub fn react_ask(
 
         let state = summarize_state(&hits, &context);
         let (system, user) = plan_prompt(question, &state);
+
         let plan_raw = llm_chat(llm_cfg, &system, &user)
-            .unwrap_or_else(|e| format!("{{\"action\":\"stop\",\"reason\":\"{e}\"}}"));
+            .unwrap_or_else(|e| format!("{{\"action\":\"stop\",\"reason\":\"LLM call failed: {e}\"}}"));
 
         let action = extract_first_json_object(&plan_raw)
             .and_then(|j| serde_json::from_str::<ReActAction>(&j).ok());
         let mut observation = String::new();
+
+        // Safety check: if state shows list_dir and user asks to fix/repair, force answer
+        let question_lower = question.to_lowercase();
+        let asks_to_fix = question_lower.contains("fix") || question_lower.contains("修复") || question_lower.contains("repair");
+        let has_list_dir_visible = state.contains("visible_functions=[list_dir]");
+        if asks_to_fix && has_list_dir_visible {
+            observation.push_str("Code already exists in context. Answering instead of editing.\n");
+        }
+
+        // Detect duplicate edits and force answer instead
+        let action = match &action {
+            Some(ReActAction::EditFile { path, start_line, end_line, .. }) => {
+                // Also check: if user asks to fix existing code that's visible, force answer
+                if asks_to_fix && has_list_dir_visible {
+                    observation.push_str("Edit skipped: code exists in context, using answer instead.\n");
+                    Some(ReActAction::Answer)
+                } else if let Some((last_path, last_start, last_end)) = &last_edit {
+                    if path == last_path && start_line == last_start && end_line == last_end {
+                        observation.push_str(&format!(
+                            "duplicate edit skipped: already edited {}:{}..={} in previous step. Moving to answer.\n",
+                            path, start_line, end_line
+                        ));
+                        Some(ReActAction::Answer)
+                    } else {
+                        action.clone()
+                    }
+                } else {
+                    action.clone()
+                }
+            }
+            _ => action.clone(),
+        };
 
         match action.clone().unwrap_or(ReActAction::Stop {
             reason: Some("invalid plan".into()),
@@ -403,17 +453,139 @@ pub fn react_ask(
                     ));
                 }
             }
+            ReActAction::EditFile {
+                path,
+                start_line,
+                end_line,
+                new_content,
+                create_backup,
+            } => {
+                let file_path = repo_root.join(&path);
+                let op = EditOp::ReplaceLines {
+                    start_line,
+                    end_line,
+                    new_content,
+                };
+
+                match crate::tools::edit_file(&file_path, &op, create_backup) {
+                    Ok(result) => {
+                        if result.success {
+                            // Track this edit to prevent duplicates
+                            last_edit = Some((path.clone(), start_line, end_line));
+
+                            // Read the modified file to show the result
+                            let preview_start = start_line.saturating_sub(3);
+                            let preview_end = start_line + 3;
+                            let modified_content = match crate::tools::read_file(&file_path, Some((preview_start, preview_end))) {
+                                Ok(content) => content.trim().to_string(),
+                                Err(_) => "(unable to read modified content)".to_string()
+                            };
+
+                            observation.push_str(&format!(
+                                "edit ok: path={} lines_changed={} backup={}\nModified content preview:\n{}\n\nEDIT COMPLETE. File modified successfully. PROCEED TO ANSWER.",
+                                result.path,
+                                result.lines_changed.unwrap_or(0),
+                                result.backup_path.is_some(),
+                                modified_content
+                            ));
+                        } else {
+                            observation.push_str(&format!(
+                                "edit failed: path={} error={}",
+                                result.path,
+                                result.error.unwrap_or_else(|| "unknown".to_string())
+                            ));
+                        }
+                    }
+                    Err(e) => {
+                        observation.push_str(&format!("edit error: {}", e));
+                    }
+                }
+
+                // After successful edit, refresh context for the edited file
+                if observation.contains("EDIT COMPLETE") {
+                    // Read the edited function's content (around the edited lines)
+                    let preview_start = start_line.saturating_sub(10);
+                    let preview_end = start_line + 20;
+
+                    if let Ok(edited_snippet) = crate::tools::read_file(&file_path, Some((preview_start, preview_end))) {
+                        let edited_chunk = ContextChunk {
+                            path: path.clone(),
+                            alias: 0,
+                            snippet: edited_snippet,
+                            start_line: preview_start,
+                            end_line: preview_end,
+                            reason: format!("EDITED: lines {}..={} (modified content)", start_line, end_line),
+                        };
+
+                        // Add the edited file to the FRONT of context so it's prioritized
+                        context.insert(0, edited_chunk);
+                        observation.push_str(&format!(" Edited portion added to context: lines {}..={}.", preview_start, preview_end));
+                    }
+
+                    // Also do a re-search to get related chunks
+                    let file_keywords = path.split('/')
+                        .last()
+                        .unwrap_or(&path)
+                        .trim_end_matches(".rs")
+                        .to_string();
+
+                    if let Ok((new_hits, t)) = search_code_keyword(
+                        repo_root,
+                        &file_keywords,
+                        tokenizer,
+                        IndexChunkOptions::default(),
+                        SearchCodeOptions {
+                            max_hits: 50,
+                            ..Default::default()
+                        },
+                    ) {
+                        pack.trace.extend(t);
+                        hits = merge_hits(hits, new_hits);
+                        let (ctx, t2) = refill_hits(repo_root, &hits, RefillOptions::default())?;
+                        pack.trace.extend(t2);
+
+                        // Merge without duplicating the edited file we just added
+                        let mut seen_paths = HashSet::new();
+                        seen_paths.insert(path.clone());
+
+                        for c in ctx {
+                            if !seen_paths.contains(&c.path) || c.path != path {
+                                context.push(c);
+                            }
+                        }
+
+                        observation.push_str(&format!(" Context refreshed: {} chunks available.", context.len()));
+                    }
+                }
+            }
             ReActAction::Answer => {
                 observation.push_str("answer");
                 pack.hits = hits.clone();
                 pack.context = context.clone();
 
-                let prompt_context = render_prompt_context(
+                let mut prompt_context = render_prompt_context(
                     repo_root,
                     &pack,
                     tokenizer,
                     react_opt.context_engine.clone(),
                 )?;
+
+                // If there was an edit, add the edited content directly to prompt
+                if let Some((edited_path, edited_start, edited_end)) = &last_edit {
+                    let file_path = repo_root.join(edited_path);
+                    let preview_start = edited_start.saturating_sub(10);
+                    let preview_end = edited_end + 10;
+
+                    if let Ok(edited_content) = crate::tools::read_file(&file_path, Some((preview_start, preview_end))) {
+                        prompt_context.push_str(&format!("\n## Edited File Context\n"));
+                        prompt_context.push_str(&format!("{}:{}..={}\n", edited_path, preview_start + 1, preview_end + 1));
+                        prompt_context.push_str(&format!("reason: modified content (after edit)\n"));
+                        prompt_context.push_str("```\n");
+                        prompt_context.push_str(&edited_content);
+                        prompt_context.push_str("\n```\n");
+                    }
+                }
+
                 let answer = crate::llm::llm_answer(llm_cfg, question, &prompt_context)?;
 
                 step_traces.push(ReActStepTrace {

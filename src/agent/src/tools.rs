@@ -1,12 +1,12 @@
-use crate::types::{ContextPack, ToolName, ToolTrace};
+use crate::types::{ContextPack, EditOp, EditResult, TerminalResult, ToolName, ToolTrace};
 use anyhow::Result;
 use core::code_chunk::{ContextChunk, IndexChunk, IndexChunkOptions, RefillOptions};
-use core::symbol::Symbol;
-use intelligence::{ALL_LANGUAGES, TreeSitterFile};
+use intelligence::ALL_LANGUAGES;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
+use std::process::Command;
 use tokenizers::Tokenizer;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -242,23 +242,333 @@ pub fn refill_hits(
     Ok((out, trace))
 }
 
-/// List symbols in file (function/class/variable definitions, etc.)
-pub fn list_symbols(path: &Path) -> Result<Vec<Symbol>> {
-    let bytes = fs::read(path)?;
-    let Some(lang_id) = detect_lang_id(path) else {
-        return Ok(Vec::new());
-    };
-
-    let ts = TreeSitterFile::try_build(&bytes, lang_id)
-        .map_err(|e| anyhow::anyhow!("failed to parse {:?}: {e:?}", path))?;
-    let graph = ts
-        .scope_graph()
-        .map_err(|e| anyhow::anyhow!("failed to  build scope graph {:?}: {e:?}", path))?;
-
-    Ok(graph.symbols())
+/// Directory entry for list_dir tool
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DirEntry {
+    pub name: String,
+    pub path: String,
+    pub is_dir: bool,
+    pub is_file: bool,
+    pub size: Option<u64>,
 }
 
-/// search -> refill -> pack
+/// List directory contents (non-recursive, one level)
+pub fn list_dir(dir: &Path) -> Result<Vec<DirEntry>> {
+    let mut entries = Vec::new();
+
+    let rd = fs::read_dir(dir)
+        .map_err(|e| anyhow::anyhow!("failed to read directory {:?}: {}", dir, e))?;
+
+    for entry in rd {
+        let entry = entry.map_err(|e| anyhow::anyhow!("failed to read dir entry: {}", e))?;
+        let path = entry.path();
+
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "?".to_string());
+
+        let rel_path = path
+            .strip_prefix(dir)
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| path.to_string_lossy().to_string());
+
+        let ft = entry.file_type().map_err(|e| anyhow::anyhow!("failed to get file type: {}", e))?;
+        let is_dir = ft.is_dir();
+        let is_file = ft.is_file();
+
+        let size = if is_file {
+            fs::metadata(&path).ok().map(|m| m.len())
+        } else {
+            None
+        };
+
+        entries.push(DirEntry {
+            name,
+            path: rel_path,
+            is_dir,
+            is_file,
+            size,
+        });
+    }
+    entries.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(entries)
+}
+
+/// Edit file with backup support
+///
+/// # Arguments
+/// * `path` - Full path to the file
+/// * `op` - Edit operation to perform
+/// * `create_backup` - Whether to create .backup file before editing
+///
+/// # Returns
+/// Edit result with success status and optional error message
+pub fn edit_file(path: &Path, op: &EditOp, create_backup: bool) -> Result<EditResult> {
+    let path_str = path.to_string_lossy().to_string();
+
+    // Create backup if requested
+    let backup_path = if create_backup {
+        let backup = format!("{}.backup", path_str);
+        if path.exists() {
+            fs::copy(&path, &backup).map_err(|e| {
+                anyhow::anyhow!("failed to create backup {:?}: {}", backup, e)
+            })?;
+            Some(backup)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let lines_changed = match op {
+        EditOp::ReplaceAll { new_content } => {
+            fs::write(&path, new_content)
+                .map_err(|e| anyhow::anyhow!("failed to write {:?}: {}", path, e))?;
+            Some(new_content.lines().count())
+        }
+        EditOp::ReplaceLines {
+            start_line,
+            end_line,
+            new_content,
+        } => {
+            if !path.exists() {
+                return Ok(EditResult {
+                    path: path_str,
+                    success: false,
+                    lines_changed: None,
+                    error: Some("file does not exist".to_string()),
+                    backup_path,
+                });
+            }
+
+            let original = fs::read_to_string(&path).map_err(|e| {
+                anyhow::anyhow!("failed to read {:?} for editing: {}", path, e)
+            })?;
+
+            let mut lines: Vec<&str> = original.lines().collect();
+
+            // Convert to 0-based indices
+            let start = start_line.saturating_sub(1);
+            let end = end_line.saturating_sub(1).min(lines.len().saturating_sub(1));
+
+            if start > end || end >= lines.len() {
+                return Ok(EditResult {
+                    path: path_str,
+                    success: false,
+                    lines_changed: None,
+                    error: Some(format!(
+                        "invalid line range: {}..={} (file has {} lines)",
+                        start_line,
+                        end_line,
+                        lines.len()
+                    )),
+                    backup_path,
+                });
+            }
+
+            let new_lines: Vec<&str> = new_content.lines().collect();
+            let _removed = end - start + 1;
+
+            // Replace the range
+            lines.drain(start..=end);
+            for (i, line) in new_lines.iter().enumerate() {
+                lines.insert(start + i, *line);
+            }
+
+            // Auto-remove duplicate consecutive lines
+            let mut deduped_lines = Vec::new();
+            let mut prev_line: Option<&str> = None;
+            for line in lines.iter() {
+                if Some(*line) != prev_line {
+                    deduped_lines.push(*line);
+                    prev_line = Some(*line);
+                }
+            }
+
+            // If deduplication removed lines, update the file
+            if deduped_lines.len() != lines.len() {
+                let new_content = deduped_lines.join("\n") + "\n";
+                fs::write(&path, new_content)
+                    .map_err(|e| anyhow::anyhow!("failed to write edited {:?}: {}", path, e))?;
+
+                return Ok(EditResult {
+                    path: path_str,
+                    success: true,
+                    lines_changed: Some(new_lines.len()),
+                    error: Some(format!("removed {} duplicate lines", lines.len() - deduped_lines.len())),
+                    backup_path,
+                });
+            }
+
+            let new_content = lines.join("\n") + "\n";
+            fs::write(&path, new_content)
+                .map_err(|e| anyhow::anyhow!("failed to write edited {:?}: {}", path, e))?;
+
+            Some(new_lines.len())
+        }
+        EditOp::UnifiedDiff { diff: _ } => {
+            // TODO: Implement proper unified diff parsing
+            // For now, return error indicating not yet implemented
+            return Ok(EditResult {
+                path: path_str,
+                success: false,
+                lines_changed: None,
+                error: Some("unified diff parsing not yet implemented".to_string()),
+                backup_path,
+            });
+        }
+    };
+
+    Ok(EditResult {
+        path: path_str,
+        success: true,
+        lines_changed,
+        error: None,
+        backup_path,
+    })
+}
+
+/// Dangerous commands that should require user confirmation
+const DANGEROUS_COMMANDS: &[&str] = &[
+    "rm -rf",
+    "rm -r",
+    "del /f",
+    "format",
+    "mkfs",
+    "shutdown",
+    "reboot",
+    "dd if=",
+    "> /dev/",
+    "kill -9",
+];
+
+/// Check if a command is dangerous
+fn is_dangerous_command(cmd: &str) -> bool {
+    let cmd_lower = cmd.to_lowercase();
+    DANGEROUS_COMMANDS
+        .iter()
+        .any(|dangerous| cmd_lower.contains(dangerous))
+}
+
+/// Run terminal command with safety checks
+///
+/// # Arguments
+/// * `command` - Command string to execute (e.g., "cargo build" or ["cargo", "build"])
+/// * `cwd` - Working directory (None = use current dir)
+/// * `allow_dangerous` - If false, dangerous commands will be rejected
+///
+/// # Returns
+/// Terminal execution result
+pub fn run_terminal(command: &str, cwd: Option<&Path>, allow_dangerous: bool) -> Result<TerminalResult> {
+    // Safety check for dangerous commands
+    if !allow_dangerous && is_dangerous_command(command) {
+        return Ok(TerminalResult {
+            command: command.to_string(),
+            exit_code: None,
+            stdout: String::new(),
+            stderr: String::new(),
+            success: false,
+            error: Some(format!(
+                "command rejected as dangerous: {}. Use allow_dangerous=true to override.",
+                command
+            )),
+        });
+    }
+
+    // Parse command: split by spaces but respect quotes
+    let args = parse_command_args(command);
+    if args.is_empty() {
+        return Ok(TerminalResult {
+            command: command.to_string(),
+            exit_code: None,
+            stdout: String::new(),
+            stderr: String::new(),
+            success: false,
+            error: Some("empty command".to_string()),
+        });
+    }
+
+    let program = &args[0];
+    let cmd_args = &args[1..];
+
+    let mut cmd = Command::new(program);
+    if let Some(dir) = cwd {
+        cmd.current_dir(dir);
+    }
+    cmd.args(cmd_args);
+
+    let output = match cmd.output() {
+        Ok(output) => output,
+        Err(e) => {
+            return Ok(TerminalResult {
+                command: command.to_string(),
+                exit_code: None,
+                stdout: String::new(),
+                stderr: String::new(),
+                success: false,
+                error: Some(format!("failed to execute command: {}", e)),
+            });
+        }
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let success = output.status.success();
+    let exit_code = output.status.code();
+
+    Ok(TerminalResult {
+        command: command.to_string(),
+        exit_code,
+        stdout,
+        stderr,
+        success,
+        error: if success { None } else { Some("command failed".to_string()) },
+    })
+}
+
+/// Simple command argument parser (respects quotes)
+fn parse_command_args(cmd: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    let mut current = String::new();
+    let mut in_quote = false;
+    let mut escape = false;
+
+    for ch in cmd.chars() {
+        if escape {
+            current.push(ch);
+            escape = false;
+            continue;
+        }
+
+        match ch {
+            '\\' => {
+                escape = true;
+            }
+            '"' => {
+                in_quote = !in_quote;
+            }
+            ' ' | '\t' if !in_quote => {
+                if !current.is_empty() {
+                    args.push(current.clone());
+                    current.clear();
+                }
+            }
+            _ => {
+                current.push(ch);
+            }
+        }
+    }
+
+    if !current.is_empty() {
+        args.push(current);
+    }
+
+    args
+}
+
+/// Convenience function: search -> refill -> pack
 pub fn build_context_pack_keyword(
     repo_root: &Path,
     query: &str,

@@ -7,6 +7,9 @@ pub enum ToolName {
     SearchCode,
     RefillChunks,
     ListSymbols,
+    ListDir,
+    EditFile,
+    RunTerminal,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,6 +48,14 @@ pub struct LLMConfig {
 #[serde(tag = "action", rename_all = "lowercase")]
 pub enum ReActAction {
     Search { query: String },
+    #[serde(rename = "edit_file")]
+    EditFile {
+        path: String,
+        start_line: usize,
+        end_line: usize,
+        new_content: String,
+        create_backup: bool,
+    },
     Answer,
     Stop { reason: Option<String> },
 }
@@ -91,3 +102,40 @@ impl Default for ReActOptions {
         }
     }
 }
+
+/// Edit operation for edit_file tool
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum EditOp {
+    /// Replace entire file content
+    ReplaceAll { new_content: String },
+    /// Replace specific line range (1-based, inclusive)
+    ReplaceLines {
+        start_line: usize,
+        end_line: usize,
+        new_content: String,
+    },
+    /// Unified diff format (simplified)
+    UnifiedDiff { diff: String },
+}
+
+/// Result of edit_file operation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EditResult {
+    pub path: String,
+    pub success: bool,
+    pub lines_changed: Option<usize>,
+    pub error: Option<String>,
+    pub backup_path: Option<String>,
+}
+
+/// Terminal command execution result
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TerminalResult {
+    pub command: String,
+    pub exit_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+    pub success: bool,
+    pub error: Option<String>,
+}
+
