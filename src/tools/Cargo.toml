@@ -1,0 +1,15 @@
+[package]
+name = "tools"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+core = { path = "../core" }
+intelligence = { path = "../intelligence" }
+index = { path = "../index" }
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+tokenizers = "0.21"
+walkdir = "2.4"
+shell-words = "1.0"
+regex = "1.9"

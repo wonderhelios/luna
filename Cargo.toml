@@ -1,3 +1,14 @@
 [workspace]
 resolver = "2"
-members = ["src/core", "src/intelligence", "src/agent", "src/server", "src/index"]
+members = [
+    "src/core",
+    "src/intelligence",
+    "src/index",
+    "src/llm",
+    "src/tools",
+    "src/toolkit",
+    "src/cache",
+    "src/config",
+    "src/react",
+    "src/cli",
+]

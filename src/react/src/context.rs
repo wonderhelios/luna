@@ -1,20 +1,66 @@
-use crate::tools::read_file_by_lines;
-use crate::types::{ContextEngineOptions, ContextPack};
+//! Context Engine for ReAct Loop
+//!
+//! This module handles:
+//! - Selecting and ranking context chunks
+//! - Rendering context for LLM consumption
+//! - Token budget management
+
+use crate::ContextPack;
 use anyhow::Result;
-use core::code_chunk::{ContextChunk, IndexChunk};
+use core::code_chunk::ContextChunk;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
 use tokenizers::Tokenizer;
 
-// Render ContextPack into prompt context paragraphs ready for LLM injection
+use tools::fs::read_file_by_lines;
+
+// ============================================================================
+// Context Engine Options
+// ============================================================================
+
+/// Options for context rendering and selection
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContextEngineOptions {
+    /// Maximum number of chunks to include
+    pub max_chunks: usize,
+
+    /// Maximum total tokens (0 = no limit)
+    pub max_total_tokens: usize,
+
+    /// Merge chunks within this many lines
+    pub merge_gap_lines: usize,
+}
+
+impl Default for ContextEngineOptions {
+    fn default() -> Self {
+        Self {
+            max_chunks: 8,
+            max_total_tokens: 2_000,
+            merge_gap_lines: 3,
+        }
+    }
+}
+
+// ============================================================================
+// Context Rendering
+// ============================================================================
+
+/// Render ContextPack into prompt context paragraphs ready for LLM injection
 pub fn render_prompt_context(
     repo_root: &Path,
     pack: &ContextPack,
     tokenizer: &Tokenizer,
     opt: ContextEngineOptions,
 ) -> Result<String> {
-    let selected =
-        select_context_chunks(repo_root, &pack.hits, &pack.context, tokenizer, opt.clone())?;
+    let selected = select_context_chunks(
+        repo_root,
+        &pack.hits,
+        &pack.context,
+        tokenizer,
+        opt.clone(),
+    )?;
+
     let mut out = String::new();
     out.push_str("# Retrieved Context\n\n");
     out.push_str(&format!("Query: {}\n\n", pack.query));
@@ -36,9 +82,14 @@ pub fn render_prompt_context(
     Ok(out)
 }
 
+// ============================================================================
+// Context Selection
+// ============================================================================
+
+/// Select and rank context chunks based on hits
 fn select_context_chunks(
     repo_root: &Path,
-    hits: &[IndexChunk],
+    hits: &[core::code_chunk::IndexChunk],
     context: &[ContextChunk],
     tokenizer: &Tokenizer,
     opt: ContextEngineOptions,
@@ -82,6 +133,7 @@ fn select_context_chunks(
             });
         }
     }
+
     // 2) Calculate hit count for each ContextChunk, used for ranking
     let mut scored = merged_all
         .into_iter()
@@ -95,6 +147,7 @@ fn select_context_chunks(
             (cnt, c)
         })
         .collect::<Vec<_>>();
+
     // Prioritize more hits; with same hits, prefer shorter; then sort by path
     scored.sort_by(|(ac, a), (bc, b)| {
         bc.cmp(ac)
@@ -127,10 +180,28 @@ fn select_context_chunks(
         }
         selected = keep;
     }
+
     // Normalize alias + stable sort (for downstream referencing)
     selected.sort_by(|a, b| (a.path.as_str(), a.start_line).cmp(&(b.path.as_str(), b.start_line)));
     for (i, c) in selected.iter_mut().enumerate() {
         c.alias = i;
     }
     Ok(selected)
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_context_engine_options_default() {
+        let opt = ContextEngineOptions::default();
+        assert_eq!(opt.max_chunks, 8);
+        assert_eq!(opt.max_total_tokens, 2000);
+        assert_eq!(opt.merge_gap_lines, 3);
+    }
 }

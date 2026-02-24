@@ -1,10 +1,16 @@
 [package]
-name = "server"
+name = "cli"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
+
+[[bin]]
+name = "luna"
+path = "src/main.rs"
 
 [dependencies]
-agent = { path = "../agent" }
+react = { path = "../react" }
+llm = { path = "../llm" }
+tools = { path = "../tools" }
 core = { path = "../core" }
 intelligence = { path = "../intelligence" }
 index = { path = "../index" }
