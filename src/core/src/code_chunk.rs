@@ -135,6 +135,53 @@ impl ContextChunk {
     pub fn is_empty(&self) -> bool {
         self.snippet.trim().is_empty()
     }
+
+    /// Get a unique key for this ContextChunk, used for deduplication.
+    ///
+    /// The key is (path, start_line, end_line), which uniquely identifies
+    /// a code region regardless of snippet content or reason.
+    pub fn dedup_key(&self) -> (String, usize, usize) {
+        (self.path.clone(), self.start_line, self.end_line)
+    }
+}
+
+/// Deduplicate a vector of ContextChunks by their (path, start_line, end_line) key.
+///
+/// This is commonly used after refill_hits to eliminate duplicate chunks that
+/// may arise from multiple IndexChunks falling in the same enclosing scope.
+///
+/// # Returns
+/// A new vector with duplicates removed, sorted by (path, start_line, end_line).
+pub fn dedup_context_chunks(chunks: Vec<ContextChunk>) -> Vec<ContextChunk> {
+    use std::collections::BTreeMap;
+
+    let mut uniq: BTreeMap<(String, usize, usize), ContextChunk> = BTreeMap::new();
+    for c in chunks {
+        let key = c.dedup_key();
+        uniq.entry(key)
+            .and_modify(|existing| {
+                // Merge reasons if both chunks have different reasons
+                if !c.reason.is_empty() && existing.reason != c.reason {
+                    if !existing.reason.is_empty() {
+                        existing.reason.push_str("; ");
+                    }
+                    existing.reason.push_str(&c.reason);
+                }
+            })
+            .or_insert(c);
+    }
+
+    let mut result: Vec<_> = uniq.into_values().collect();
+    result.sort_by(|a, b| {
+        (a.path.as_str(), a.start_line, a.end_line).cmp(&(b.path.as_str(), b.start_line, b.end_line))
+    });
+
+    // Re-normalize aliases
+    for (i, c) in result.iter_mut().enumerate() {
+        c.alias = i;
+    }
+
+    result
 }
 
 #[derive(Debug, Clone)]

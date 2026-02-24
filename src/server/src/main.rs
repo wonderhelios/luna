@@ -56,6 +56,12 @@ enum Command {
         show_prompt: bool,
         #[arg(long, default_value_t = 8)]
         max_chunks: usize,
+        // enable ReAct Loop (let model to decide go on or not)
+        #[arg(long)]
+        react: bool,
+        // max times for react call
+        #[arg(long, default_value_t = 3)]
+        max_steps: usize,
     },
 }
 
@@ -74,7 +80,16 @@ fn main() -> Result<()> {
             question,
             show_prompt,
             max_chunks,
-        } => cmd_ask(repo_root, question, show_prompt, max_chunks),
+            react,
+            max_steps,
+        } => cmd_ask(
+            repo_root,
+            question,
+            show_prompt,
+            max_chunks,
+            react,
+            max_steps,
+        ),
     }
 }
 
@@ -83,12 +98,55 @@ fn cmd_ask(
     question: Vec<String>,
     show_prompt: bool,
     max_chunks: usize,
+    react: bool,
+    max_steps: usize,
 ) -> Result<()> {
     let question = question.join(" ");
     if question.trim().is_empty() {
         anyhow::bail!("question can not be empty");
     }
     let tok = demo_tokenizer();
+    let cfg = agent::LLMConfig::from_env()?;
+
+    if react {
+        let (ans, pack, steps) = agent::react_ask(
+            &repo_root,
+            &question,
+            &tok,
+            &cfg,
+            agent::ReActOptions {
+                max_steps,
+                context_engine: agent::ContextEngineOptions {
+                    max_chunks,
+                    ..Default::default()
+                },
+            },
+        )?;
+
+        println!("---\nTRACE\n---");
+        for st in &steps {
+            println!(
+                "[step {}] action={:?} obs={}",
+                st.step, st.action, st.observation
+            );
+        }
+
+        if show_prompt {
+            let prompt_context = agent::render_prompt_context(
+                &repo_root,
+                &pack,
+                &tok,
+                agent::ContextEngineOptions {
+                    max_chunks,
+                    ..Default::default()
+                },
+            )?;
+            println!("---\nPROMPT CONTEXT\n---\n{prompt_context}\n");
+        }
+        println!("---\nANSWER\n--\n{}", ans.trim());
+        return Ok(());
+    }
+
     let search_query = {
         let mut out = Vec::new();
         let mut cur = String::new();
@@ -149,7 +207,6 @@ fn cmd_ask(
         println!("---\nPROMPT CONTEXT\n---\n{prompt_context}\n");
     }
 
-    let cfg = agent::LLMConfig::from_env()?;
     let ans = agent::llm_answer(&cfg, &question, &prompt_context)?;
     println!("---\nANSWER\n---\n{}", ans.trim());
     Ok(())
