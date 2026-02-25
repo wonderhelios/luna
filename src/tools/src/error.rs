@@ -25,8 +25,41 @@ pub enum ToolError {
     /// Terminal command failed
     TerminalFailed(String),
 
+    /// Search operation failed
+    SearchFailed(String),
+
+    /// Invalid arguments provided
+    InvalidArgument(String),
+
+    /// Line range out of bounds
+    InvalidLineRange {
+        /// Start line (0-based)
+        start: usize,
+        /// End line (0-based)
+        end: usize,
+        /// Total lines in file
+        total: usize,
+    },
+
     /// Other error
     Other(String),
+}
+
+impl ToolError {
+    /// Create a new error for invalid arguments
+    pub fn invalid_argument<S: Into<String>>(msg: S) -> Self {
+        ToolError::InvalidArgument(msg.into())
+    }
+
+    /// Create a new error for search failures
+    pub fn search_failed<S: Into<String>>(msg: S) -> Self {
+        ToolError::SearchFailed(msg.into())
+    }
+
+    /// Create a new error for edit failures
+    pub fn edit_failed<S: Into<String>>(msg: S) -> Self {
+        ToolError::EditFailed(msg.into())
+    }
 }
 
 impl fmt::Display for ToolError {
@@ -38,6 +71,13 @@ impl fmt::Display for ToolError {
             ToolError::Parse(s) => write!(f, "parse error: {}", s),
             ToolError::EditFailed(s) => write!(f, "edit failed: {}", s),
             ToolError::TerminalFailed(s) => write!(f, "terminal command failed: {}", s),
+            ToolError::SearchFailed(s) => write!(f, "search failed: {}", s),
+            ToolError::InvalidArgument(s) => write!(f, "invalid argument: {}", s),
+            ToolError::InvalidLineRange { start, end, total } => write!(
+                f,
+                "invalid line range: {}..={} (file has {} lines)",
+                start, end, total
+            ),
             ToolError::Other(s) => write!(f, "{}", s),
         }
     }
@@ -57,6 +97,15 @@ impl From<io::Error> for ToolError {
         ToolError::Io(e)
     }
 }
+
+impl From<anyhow::Error> for ToolError {
+    fn from(e: anyhow::Error) -> Self {
+        ToolError::Other(e.to_string())
+    }
+}
+
+/// Result type alias for tool operations
+pub type ToolResult<T> = Result<T, ToolError>;
 
 // ============================================================================
 // Tests

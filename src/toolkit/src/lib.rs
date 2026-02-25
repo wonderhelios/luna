@@ -14,20 +14,48 @@ mod tools;
 pub use registry::ToolRegistry;
 
 // Re-export common tool implementations
-pub use tools::{
-    ReadFileTool,
-    EditFileTool,
-    ListDirTool,
-    RunTerminalTool,
-};
+pub use tools::{EditFileTool, ListDirTool, ReadFileTool, RunTerminalTool};
 
-use core::code_chunk::{IndexChunk, ContextChunk};
+use core::code_chunk::{ContextChunk, IndexChunk};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 // ============================================================================
 // Common Tool Types
 // ============================================================================
+
+/// Execution policy for tools (permission/confirmation thresholds).
+///
+/// Design goals:
+/// - Codify "which capabilities are exposed and require confirmation" as explicit policy,
+///   avoiding scattered if/else checks throughout the codebase.
+/// - Foundation for Human-in-the-loop protocols in MCP/IDE integrations.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecutionPolicy {
+    /// Whether file editing is allowed (edit_file)
+    pub allow_edit_file: bool,
+    /// Whether edit_file requires explicit confirmation (e.g., IDE user approval)
+    pub require_confirm_edit_file: bool,
+
+    /// Whether command execution is allowed (run_terminal)
+    pub allow_run_terminal: bool,
+    /// Whether run_terminal requires explicit confirmation
+    pub require_confirm_run_terminal: bool,
+}
+
+impl Default for ExecutionPolicy {
+    fn default() -> Self {
+        Self {
+            // File editing is allowed by default (M1 milestone), but can be restricted by upper layers (MCP/CLI)
+            allow_edit_file: true,
+            require_confirm_edit_file: false,
+
+            // Command execution is disabled by default (consistent with roadmap: M1 does not implement run_terminal)
+            allow_run_terminal: false,
+            require_confirm_run_terminal: true,
+        }
+    }
+}
 
 /// Input to a tool execution
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -37,6 +65,10 @@ pub struct ToolInput {
 
     /// Repository root path
     pub repo_root: PathBuf,
+
+    /// Execution policy (optional). If absent, uses `ExecutionPolicy::default()`.
+    #[serde(default)]
+    pub policy: Option<ExecutionPolicy>,
 }
 
 /// Output from a tool execution
@@ -157,7 +189,8 @@ pub trait Tool: Send + Sync {
 
 /// Helper function to parse file path from JSON args
 pub fn parse_path(args: &serde_json::Value, key: &str) -> Result<PathBuf, anyhow::Error> {
-    let path = args.get(key)
+    let path = args
+        .get(key)
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("missing field: {}", key))?;
     Ok(PathBuf::from(path))

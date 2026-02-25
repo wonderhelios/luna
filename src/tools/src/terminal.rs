@@ -1,6 +1,6 @@
 //! Terminal command execution for agents
 
-use anyhow::Result;
+use crate::ToolResult;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::process::Command;
@@ -59,7 +59,7 @@ pub fn run_terminal(
     command: &str,
     cwd: Option<&Path>,
     allow_dangerous: bool,
-) -> Result<TerminalResult> {
+) -> ToolResult<TerminalResult> {
     let command = command.trim();
 
     if command.is_empty() {

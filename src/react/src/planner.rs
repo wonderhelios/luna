@@ -7,7 +7,6 @@
 
 use serde::{Deserialize, Serialize};
 
-
 // ============================================================================
 // Action Types
 // ============================================================================
@@ -22,7 +21,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "lowercase")]
 pub enum ReActAction {
-    Search { query: String },
+    Search {
+        query: String,
+    },
     #[serde(rename = "edit_file")]
     EditFile {
         path: String,
@@ -30,9 +31,13 @@ pub enum ReActAction {
         end_line: usize,
         new_content: String,
         create_backup: bool,
+        #[serde(default)]
+        confirm: Option<bool>,
     },
     Answer,
-    Stop { reason: Option<String> },
+    Stop {
+        reason: Option<String>,
+    },
 }
 
 /// Trace of a single ReAct step
@@ -60,7 +65,7 @@ Actions:
 
 Rules:
 - Output ONLY the JSON object, no markdown
-- For edit_file: start_line equals end_line (single line)
+- For edit_file: lines are 0-based, start_line equals end_line (single line)
 - When state shows the code → answer
 - When state shows NO code → search"#;
 

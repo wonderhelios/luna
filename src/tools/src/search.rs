@@ -1,8 +1,7 @@
 //! Code search operations for agents
 
-use crate::ToolTrace;
 use crate::detect_lang_id;
-use anyhow::Result;
+use crate::{ToolResult, ToolTrace};
 use core::code_chunk::{ContextChunk, IndexChunk, IndexChunkOptions, RefillOptions};
 use index;
 use intelligence::TreeSitterFile;
@@ -11,6 +10,155 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 use tokenizers::Tokenizer;
+
+// ============================================================================
+// Search Backend Abstraction
+// ============================================================================
+
+/// Search backend abstraction: decouples placeholder keyword search from future vector/hybrid search.
+///
+/// Constraint: Regardless of backend changes, must produce a unified `IndexChunk` hit protocol
+/// for use by Refill/ContextEngine.
+pub trait SearchBackend: Send + Sync {
+    fn search(
+        &self,
+        repo_root: &Path,
+        query: &str,
+        tokenizer: &Tokenizer,
+        idx_opt: IndexChunkOptions,
+        opt: SearchCodeOptions,
+    ) -> ToolResult<(Vec<IndexChunk>, Vec<ToolTrace>)>;
+}
+
+/// Keyword placeholder search backend: scans repo files, matches query terms, and normalizes hits using `IndexChunk`.
+#[derive(Debug, Clone, Default)]
+pub struct KeywordSearchBackend;
+
+impl SearchBackend for KeywordSearchBackend {
+    fn search(
+        &self,
+        repo_root: &Path,
+        query: &str,
+        tokenizer: &Tokenizer,
+        idx_opt: IndexChunkOptions,
+        opt: SearchCodeOptions,
+    ) -> ToolResult<(Vec<IndexChunk>, Vec<ToolTrace>)> {
+        let mut trace = Vec::new();
+        let q = query.trim();
+
+        if q.is_empty() {
+            return Ok((Vec::new(), trace));
+        }
+
+        let terms: Vec<&str> = q
+            .split_whitespace()
+            .filter(|t| !t.trim().is_empty())
+            .collect();
+
+        if terms.is_empty() {
+            return Ok((Vec::new(), trace));
+        }
+
+        // Single-term fast path: exact match
+        let is_single_term = terms.len() == 1;
+
+        let mut hits = Vec::new();
+        let mut files_scanned = 0usize;
+
+        for entry in walkdir::WalkDir::new(repo_root)
+            .into_iter()
+            .filter_entry(|e| {
+                let name = e.file_name().to_string_lossy();
+                let path = e.path();
+
+                // Skip ignored directories (but still traverse into them to find files)
+                if path.is_dir() {
+                    return !opt.ignore_dirs.iter().any(|d| name == *d);
+                }
+
+                // Only process files
+                if !path.is_file() {
+                    return false;
+                }
+
+                // Check file extension
+                detect_lang_id(path).is_some()
+            })
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_file())
+        {
+            let path = entry.path();
+
+            if files_scanned >= opt.max_files {
+                break;
+            }
+            files_scanned += 1;
+
+            // Read file
+            let metadata = fs::metadata(path)?;
+            if metadata.len() > opt.max_file_bytes as u64 {
+                continue;
+            }
+
+            let src = fs::read(path)?;
+
+            // Check if file contains query terms
+            let src_str = String::from_utf8_lossy(&src);
+            let matches = if is_single_term {
+                src_str.contains(terms[0])
+            } else {
+                terms.iter().all(|t| src_str.contains(t))
+            };
+
+            if !matches {
+                continue;
+            }
+
+            // Generate IndexChunks
+            let lang_id = detect_lang_id(path).unwrap_or("");
+            let chunks = index::index_chunks(
+                "",
+                &path.to_string_lossy(),
+                &src,
+                lang_id,
+                tokenizer,
+                idx_opt.clone(),
+            );
+
+            for chunk in chunks {
+                let chunk_matches = if is_single_term {
+                    chunk.text.contains(terms[0])
+                } else {
+                    terms.iter().all(|t| chunk.text.contains(t))
+                };
+
+                if chunk_matches {
+                    hits.push(chunk);
+                }
+            }
+        }
+
+        // Deduplicate hits by (path, start_byte, end_byte)
+        let mut uniq: BTreeMap<(String, usize, usize), IndexChunk> = BTreeMap::new();
+        for h in hits {
+            let key = (h.path.clone(), h.start_byte, h.end_byte);
+            uniq.entry(key).or_insert(h);
+        }
+
+        let hits: Vec<_> = uniq.into_values().take(opt.max_hits).collect();
+
+        trace.push(ToolTrace {
+            tool: "search_code".to_string(),
+            summary: format!(
+                "backend=keyword scanned={} files, found={} hits",
+                files_scanned,
+                hits.len()
+            ),
+        });
+
+        Ok((hits, trace))
+    }
+}
 
 // ============================================================================
 // Search Options
@@ -54,109 +202,8 @@ pub fn search_code_keyword(
     tokenizer: &Tokenizer,
     idx_opt: IndexChunkOptions,
     opt: SearchCodeOptions,
-) -> Result<(Vec<IndexChunk>, Vec<ToolTrace>)> {
-    let mut trace = Vec::new();
-    let q = query.trim();
-
-    if q.is_empty() {
-        return Ok((Vec::new(), trace));
-    }
-
-    let terms: Vec<&str> = q.split_whitespace()
-        .filter(|t| !t.trim().is_empty())
-        .collect();
-
-    if terms.is_empty() {
-        return Ok((Vec::new(), trace));
-    }
-
-    // Single-term fast path: exact match
-    let is_single_term = terms.len() == 1;
-
-    let mut hits = Vec::new();
-    let mut files_scanned = 0usize;
-
-    for entry in walkdir::WalkDir::new(repo_root)
-        .into_iter()
-        .filter_entry(|e| {
-            let name = e.file_name().to_string_lossy();
-            let path = e.path();
-
-            // Skip ignored directories (but still traverse into them to find files)
-            if path.is_dir() {
-                return !opt.ignore_dirs.iter().any(|d| name == *d);
-            }
-
-            // Only process files
-            if !path.is_file() {
-                return false;
-            }
-
-            // Check file extension
-            detect_lang_id(path).is_some()
-        })
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_file())
-    {
-        let path = entry.path();
-
-        if files_scanned >= opt.max_files {
-            break;
-        }
-        files_scanned += 1;
-
-        // Read file
-        let metadata = fs::metadata(path)?;
-        if metadata.len() > opt.max_file_bytes as u64 {
-            continue;
-        }
-
-        let src = fs::read(path)?;
-
-        // Check if file contains query terms
-        let src_str = String::from_utf8_lossy(&src);
-        let matches = if is_single_term {
-            src_str.contains(terms[0])
-        } else {
-            terms.iter().all(|t| src_str.contains(t))
-        };
-
-        if !matches {
-            continue;
-        }
-
-        // Generate IndexChunks
-        let lang_id = detect_lang_id(path).unwrap_or("");
-        let chunks = index::index_chunks("", &path.to_string_lossy(), &src, lang_id, tokenizer, idx_opt.clone());
-
-        for chunk in chunks {
-            let chunk_matches = if is_single_term {
-                chunk.text.contains(terms[0])
-            } else {
-                terms.iter().all(|t| chunk.text.contains(t))
-            };
-
-            if chunk_matches {
-                hits.push(chunk);
-            }
-        }
-    }
-
-    // Deduplicate hits by (path, start_byte, end_byte)
-    let mut uniq: BTreeMap<(String, usize, usize), IndexChunk> = BTreeMap::new();
-    for h in hits {
-        let key = (h.path.clone(), h.start_byte, h.end_byte);
-        uniq.entry(key).or_insert(h);
-    }
-
-    let hits: Vec<_> = uniq.into_values().take(opt.max_hits).collect();
-
-    trace.push(ToolTrace {
-        tool: "search_code_keyword".to_string(),
-        summary: format!("scanned {} files, found {} hits", files_scanned, hits.len()),
-    });
-
-    Ok((hits, trace))
+) -> ToolResult<(Vec<IndexChunk>, Vec<ToolTrace>)> {
+    KeywordSearchBackend::default().search(repo_root, query, tokenizer, idx_opt, opt)
 }
 
 // ============================================================================
@@ -168,7 +215,7 @@ pub fn refill_hits(
     repo_root: &Path,
     hits: &[IndexChunk],
     opt: RefillOptions,
-) -> Result<(Vec<ContextChunk>, Vec<ToolTrace>)> {
+) -> ToolResult<(Vec<ContextChunk>, Vec<ToolTrace>)> {
     let mut trace = Vec::new();
     let mut context = Vec::new();
 
@@ -187,7 +234,7 @@ pub fn refill_hits(
 
         // Refill using index module
         let mut file_context = index::refill_chunks(&path, &src, lang_id, &file_hits, opt.clone())
-            .map_err(|e| anyhow::anyhow!("refill failed for {}: {:?}", path, e))?;
+            .map_err(|e| crate::ToolError::search_failed(format!("refill failed for {}: {:?}", path, e)))?;
 
         context.append(&mut file_context);
     }
@@ -203,7 +250,11 @@ pub fn refill_hits(
 
     trace.push(ToolTrace {
         tool: "refill_hits".to_string(),
-        summary: format!("refilled {} hits into {} context chunks", hits.len(), context.len()),
+        summary: format!(
+            "refilled {} hits into {} context chunks",
+            hits.len(),
+            context.len()
+        ),
     });
 
     Ok((context, trace))
@@ -218,7 +269,7 @@ pub fn find_symbol_definitions(
     repo_root: &Path,
     symbol_name: &str,
     max_results: usize,
-) -> Result<Vec<SymbolLocation>> {
+) -> ToolResult<Vec<SymbolLocation>> {
     let mut results = Vec::new();
 
     for entry in walkdir::WalkDir::new(repo_root)
@@ -227,12 +278,15 @@ pub fn find_symbol_definitions(
             let path = e.path();
             if path.is_dir() {
                 let name = e.file_name().to_string_lossy();
-                return !matches!(name.as_ref(), "target" | "node_modules" | ".git" | "dist" | "build");
+                return !matches!(
+                    name.as_ref(),
+                    "target" | "node_modules" | ".git" | "dist" | "build"
+                );
             }
             path.is_file() && detect_lang_id(path).is_some()
         })
     {
-        let entry = entry.map_err(|e| anyhow::anyhow!("walk error: {}", e))?;
+        let entry = entry.map_err(|e| crate::ToolError::search_failed(format!("walk error: {}", e)))?;
         let path = entry.path();
 
         if results.len() >= max_results {
@@ -259,7 +313,8 @@ pub fn find_symbol_definitions(
                 let name = String::from_utf8_lossy(def.name(src_str.as_bytes()));
                 if name == symbol_name {
                     results.push(SymbolLocation {
-                        path: path.strip_prefix(repo_root)
+                        path: path
+                            .strip_prefix(repo_root)
                             .unwrap_or(path)
                             .to_string_lossy()
                             .to_string(),

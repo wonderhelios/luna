@@ -13,12 +13,12 @@ pub mod fs;
 pub mod search;
 pub mod terminal;
 
-// Re-export error type
-pub use error::ToolError;
+// Re-export error types
+pub use error::{ToolError, ToolResult};
 
 // Re-export commonly used types
-pub use fs::{read_file, edit_file, list_dir, DirEntry, EditOp, EditResult};
-pub use search::{search_code_keyword, refill_hits, SearchCodeOptions};
+pub use fs::{edit_file, list_dir, read_file, DirEntry, EditOp, EditResult};
+pub use search::{refill_hits, search_code_keyword, SearchCodeOptions};
 pub use terminal::{run_terminal, TerminalResult};
 
 use core::code_chunk::{ContextChunk, IndexChunk, IndexChunkOptions};
@@ -64,16 +64,23 @@ pub fn detect_lang_id(path: &Path) -> Option<&'static str> {
 /// - camelCase identifiers (e.g., `contextChunks`, `myFunction`)
 /// - PascalCase identifiers (e.g., `ContextChunk`, `MyClass`)
 pub fn extract_code_identifiers(query: &str) -> Vec<String> {
+    use once_cell::sync::Lazy;
     use regex::Regex;
+
+    // Use Lazy to cache compiled regexes, ensuring:
+    // - Only compiled once
+    // - Avoid repeated allocation/compilation on each call
+    static SNAKE_RE: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(r"[a-zA-Z_][a-zA-Z0-9_]{2,}").expect("internal regex must be valid")
+    });
+    static CAMEL_RE: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(r"\b[a-zA-Z][a-zA-Z0-9]*?[A-Z][a-zA-Z0-9]*\b")
+            .expect("internal regex must be valid")
+    });
 
     let mut identifiers = Vec::new();
 
-    // snake_case: starts with letter/underscore, contains letters/numbers/underscores
-    let snake_re = Regex::new(r"[a-zA-Z_][a-zA-Z0-9_]{2,}").unwrap();
-    // camelCase/PascalCase: starts with lowercase/uppercase letter, contains camelCase patterns
-    let camel_re = Regex::new(r"\b[a-zA-Z][a-zA-Z0-9]*?[A-Z][a-zA-Z0-9]*\b").unwrap();
-
-    for cap in snake_re.find_iter(query) {
+    for cap in SNAKE_RE.find_iter(query) {
         let s = cap.as_str();
         // Only add if it looks like code (contains underscore or is reasonably long)
         if s.contains('_') || s.len() >= 3 {
@@ -81,7 +88,7 @@ pub fn extract_code_identifiers(query: &str) -> Vec<String> {
         }
     }
 
-    for cap in camel_re.find_iter(query) {
+    for cap in CAMEL_RE.find_iter(query) {
         let s = cap.as_str();
         if !identifiers.contains(&s.to_string()) {
             identifiers.push(s.to_string());
@@ -115,7 +122,7 @@ pub fn build_context_pack_keyword(
     search_opt: SearchCodeOptions,
     index_opt: IndexChunkOptions,
     refill_opt: core::code_chunk::RefillOptions,
-) -> Result<ContextPack, anyhow::Error> {
+) -> ToolResult<ContextPack> {
     // Determine if this is a natural language query (contains non-ASCII chars or spaces)
     let is_natural_language = query.chars().any(|c| c.is_alphabetic() && !c.is_ascii());
 
@@ -135,7 +142,13 @@ pub fn build_context_pack_keyword(
     let mut all_trace = Vec::new();
 
     for search_query in search_queries {
-        let (hits, trace) = search_code_keyword(repo_root, &search_query, tokenizer, index_opt.clone(), search_opt.clone())?;
+        let (hits, trace) = search_code_keyword(
+            repo_root,
+            &search_query,
+            tokenizer,
+            index_opt.clone(),
+            search_opt.clone(),
+        )?;
         all_hits.extend(hits);
         all_trace.extend(trace);
     }

@@ -6,9 +6,11 @@
 //! - State tracking
 //! - Loop termination
 
-use crate::planner::{ReActAction, ReActStepTrace, expand_seed_terms, extract_first_json_object, plan_prompt};
 use crate::context::{render_prompt_context, ContextEngineOptions};
-use crate::{summarize_state, merge_hits};
+use crate::planner::{
+    expand_seed_terms, extract_first_json_object, plan_prompt, ReActAction, ReActStepTrace,
+};
+use crate::{merge_hits, summarize_state};
 use anyhow::Result;
 use core::code_chunk::{ContextChunk, IndexChunkOptions, RefillOptions};
 use serde::{Deserialize, Serialize};
@@ -17,8 +19,9 @@ use std::path::Path;
 use tokenizers::Tokenizer;
 
 use llm::{LLMClient, LLMConfig};
-use tools::{ContextPack, SearchCodeOptions, EditOp};
-use tools::{search_code_keyword, refill_hits, edit_file, read_file};
+use toolkit::ExecutionPolicy;
+use tools::{edit_file, read_file, refill_hits, search_code_keyword};
+use tools::{ContextPack, EditOp, SearchCodeOptions};
 
 // ============================================================================
 // Agent Options
@@ -32,6 +35,9 @@ pub struct ReactOptions {
 
     /// Context engine options
     pub context_engine: ContextEngineOptions,
+
+    /// Execution policy for potentially destructive actions
+    pub policy: ExecutionPolicy,
 }
 
 impl Default for ReactOptions {
@@ -39,6 +45,7 @@ impl Default for ReactOptions {
         Self {
             max_steps: 3,
             context_engine: ContextEngineOptions::default(),
+            policy: ExecutionPolicy::default(),
         }
     }
 }
@@ -128,8 +135,9 @@ impl ReactAgent {
             let state = summarize_state(&hits, &context);
             let (system, user) = plan_prompt(question, &state);
 
-            let plan_raw = client.chat_system_user(&system, &user)
-                .unwrap_or_else(|e| format!("{{\"action\":\"stop\",\"reason\":\"LLM call failed: {e}\"}}"));
+            let plan_raw = client.chat_system_user(&system, &user).unwrap_or_else(|e| {
+                format!("{{\"action\":\"stop\",\"reason\":\"LLM call failed: {e}\"}}")
+            });
 
             let action = extract_first_json_object(&plan_raw)
                 .and_then(|j| serde_json::from_str::<ReActAction>(&j).ok());
@@ -142,14 +150,22 @@ impl ReactAgent {
                 || question_lower.contains("repair");
             let has_list_dir_visible = state.contains("visible_functions=[list_dir]");
             if asks_to_fix && has_list_dir_visible {
-                observation.push_str("Code already exists in context. Answering instead of editing.\n");
+                observation
+                    .push_str("Code already exists in context. Answering instead of editing.\n");
             }
 
             // Detect duplicate edits and force answer instead
             let action = match &action {
-                Some(ReActAction::EditFile { path, start_line, end_line, .. }) => {
+                Some(ReActAction::EditFile {
+                    path,
+                    start_line,
+                    end_line,
+                    ..
+                }) => {
                     if asks_to_fix && has_list_dir_visible {
-                        observation.push_str("Edit skipped: code exists in context, using answer instead.\n");
+                        observation.push_str(
+                            "Edit skipped: code exists in context, using answer instead.\n",
+                        );
                         Some(ReActAction::Answer)
                     } else if let Some((last_path, last_start, last_end)) = &last_edit {
                         if path == last_path && start_line == last_start && end_line == last_end {
@@ -225,7 +241,21 @@ impl ReactAgent {
                     end_line,
                     new_content,
                     create_backup,
+                    confirm,
                 } => {
+                    // Policy gate: allow/confirm edit_file
+                    if !self.options.policy.allow_edit_file {
+                        observation.push_str("edit blocked by policy: allow_edit_file=false");
+                        continue;
+                    }
+                    if self.options.policy.require_confirm_edit_file
+                        && confirm.unwrap_or(false) != true
+                    {
+                        observation.push_str(
+                            "edit requires confirmation: set confirm=true (Human-in-the-loop)",
+                        );
+                        continue;
+                    }
                     let file_path = repo_root.join(&path);
                     let op = EditOp::ReplaceLines {
                         start_line,
@@ -240,10 +270,12 @@ impl ReactAgent {
 
                                 let preview_start = start_line.saturating_sub(3);
                                 let preview_end = start_line + 3;
-                                let modified_content = match read_file(&file_path, Some((preview_start, preview_end))) {
-                                    Ok(content) => content.trim().to_string(),
-                                    Err(_) => "(unable to read modified content)".to_string()
-                                };
+                                let modified_content =
+                                    match read_file(&file_path, Some((preview_start, preview_end)))
+                                    {
+                                        Ok(content) => content.trim().to_string(),
+                                        Err(_) => "(unable to read modified content)".to_string(),
+                                    };
 
                                 observation.push_str(&format!(
                                     "edit ok: path={} lines_changed={} backup={}\nModified content preview:\n{}\n\nEDIT COMPLETE. File modified successfully. PROCEED TO ANSWER.",
@@ -270,20 +302,27 @@ impl ReactAgent {
                         let preview_start = start_line.saturating_sub(10);
                         let preview_end = start_line + 20;
 
-                        if let Ok(edited_snippet) = read_file(&file_path, Some((preview_start, preview_end))) {
+                        if let Ok(edited_snippet) =
+                            read_file(&file_path, Some((preview_start, preview_end)))
+                        {
                             let edited_chunk = ContextChunk {
                                 path: path.clone(),
                                 alias: 0,
                                 snippet: edited_snippet,
                                 start_line: preview_start,
                                 end_line: preview_end,
-                                reason: format!("EDITED: lines {}..={} (modified content)", start_line, end_line),
+                                reason: format!(
+                                    "EDITED: lines {}..={} (modified content)",
+                                    start_line + 1,
+                                    end_line + 1
+                                ),
                             };
                             context.insert(0, edited_chunk);
                         }
 
                         // Re-search to get related chunks
-                        let file_keywords = path.split('/')
+                        let file_keywords = path
+                            .split('/')
                             .next_back()
                             .unwrap_or(&path)
                             .trim_end_matches(".rs")
@@ -301,7 +340,8 @@ impl ReactAgent {
                         ) {
                             pack.trace.extend(t);
                             hits = merge_hits(hits, new_hits);
-                            let (ctx, t2) = refill_hits(repo_root, &hits, RefillOptions::default())?;
+                            let (ctx, t2) =
+                                refill_hits(repo_root, &hits, RefillOptions::default())?;
                             pack.trace.extend(t2);
 
                             let mut seen_paths = HashSet::new();
@@ -332,9 +372,16 @@ impl ReactAgent {
                         let preview_start = edited_start.saturating_sub(10);
                         let preview_end = edited_end + 10;
 
-                        if let Ok(edited_content) = read_file(&file_path, Some((preview_start, preview_end))) {
+                        if let Ok(edited_content) =
+                            read_file(&file_path, Some((preview_start, preview_end)))
+                        {
                             prompt_context.push_str("\n## Edited File Context\n");
-                            prompt_context.push_str(&format!("{}:{}..={}\n", edited_path, preview_start + 1, preview_end + 1));
+                            prompt_context.push_str(&format!(
+                                "{}:{}..={}\n",
+                                edited_path,
+                                preview_start + 1,
+                                preview_end + 1
+                            ));
                             prompt_context.push_str("reason: modified content (after edit)\n");
                             prompt_context.push_str("```\n");
                             prompt_context.push_str(&edited_content);

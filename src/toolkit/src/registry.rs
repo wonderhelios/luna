@@ -116,7 +116,9 @@ mod tests {
         let mut registry = ToolRegistry::new();
         assert!(registry.is_empty());
 
-        registry.register(Box::new(MockTool { name: "test".to_string() }));
+        registry.register(Box::new(MockTool {
+            name: "test".to_string(),
+        }));
         assert_eq!(registry.len(), 1);
         assert!(registry.has("test"));
     }
@@ -124,12 +126,14 @@ mod tests {
     #[test]
     fn test_registry_execute() {
         let mut registry = ToolRegistry::new();
-        registry.register(Box::new(MockTool { name: "test".to_string() }));
+        registry.register(Box::new(MockTool {
+            name: "test".to_string(),
+        }));
 
         let input = ToolInput {
             args: serde_json::json!({}),
             repo_root: std::path::PathBuf::from("."),
-            tokenizer: None,
+            policy: None,
         };
 
         let output = registry.execute("test", &input);
@@ -143,7 +147,7 @@ mod tests {
         let input = ToolInput {
             args: serde_json::json!({}),
             repo_root: std::path::PathBuf::from("."),
-            tokenizer: None,
+            policy: None,
         };
 
         let output = registry.execute("unknown", &input);

@@ -3,15 +3,17 @@
 //! These tools wrap the existing functions from the `tools` crate
 //! to implement the `Tool` trait.
 
-use crate::{Tool, ToolInput, ToolOutput, ToolSchema, parse_path, parse_string, parse_usize, parse_bool};
+use crate::{
+    parse_bool, parse_path, parse_string, parse_usize, Tool, ToolInput, ToolOutput, ToolSchema,
+};
 use serde_json::json;
 
 // Import functions from the tools crate
-use tools::{
-    read_file, edit_file, list_dir, run_terminal,
-    EditOp,
-};
+use tools::{edit_file, list_dir, read_file, run_terminal, EditOp};
 
+fn policy_of(input: &ToolInput) -> crate::ExecutionPolicy {
+    input.policy.clone().unwrap_or_default()
+}
 // ============================================================================
 // Read File Tool
 // ============================================================================
@@ -79,7 +81,10 @@ impl Tool for ReadFileTool {
         };
 
         let full_path = input.repo_root.join(&path);
-        let range = match (parse_usize(args, "start_line").ok(), parse_usize(args, "end_line").ok()) {
+        let range = match (
+            parse_usize(args, "start_line").ok(),
+            parse_usize(args, "end_line").ok(),
+        ) {
             (Some(s), Some(e)) => Some((s, e)),
             (Some(s), None) => Some((s, s)),
             _ => None,
@@ -131,11 +136,11 @@ impl Tool for EditFileTool {
                     },
                     "start_line": {
                         "type": "number",
-                        "description": "Start line (1-based)"
+                        "description": "Start line (0-based, inclusive)"
                     },
                     "end_line": {
                         "type": "number",
-                        "description": "End line (1-based)"
+                        "description": "End line (0-based, inclusive)"
                     },
                     "new_content": {
                         "type": "string",
@@ -144,6 +149,11 @@ impl Tool for EditFileTool {
                     "create_backup": {
                         "type": "boolean",
                         "description": "Create backup before editing",
+                        "default": false
+                    },
+                    "confirm": {
+                        "type":"boolean",
+                        "description": "Explicit confirmation for potentially destructive actions",
                         "default": false
                     }
                 }
@@ -160,7 +170,22 @@ impl Tool for EditFileTool {
     }
 
     fn execute(&self, input: &ToolInput) -> ToolOutput {
+        let policy = policy_of(input);
+        if !policy.allow_edit_file {
+            return ToolOutput::error("edit file is disabled by policy")
+                .with_trace("policy_blocked".to_string());
+        }
         let args = &input.args;
+
+        if policy.require_confirm_edit_file {
+            let confirmed = parse_bool(args, "confirm").unwrap_or(false);
+            if !confirmed {
+                return ToolOutput::error(
+                    "edit_file requires explicit confirmation: set confirm=true in args",
+                )
+                .with_trace("confirmation_required".to_string());
+            }
+        }
 
         let path = match parse_path(args, "path") {
             Ok(p) => p,
@@ -282,12 +307,14 @@ impl Tool for ListDirTool {
             Ok(entries) => {
                 let entries_json: Vec<serde_json::Value> = entries
                     .into_iter()
-                    .map(|e| json!({
-                        "name": e.name,
-                        "is_dir": e.is_dir,
-                        "is_file": e.is_file,
-                        "size": e.size,
-                    }))
+                    .map(|e| {
+                        json!({
+                            "name": e.name,
+                            "is_dir": e.is_dir,
+                            "is_file": e.is_file,
+                            "size": e.size,
+                        })
+                    })
                     .collect();
 
                 ToolOutput::success(json!({ "entries": entries_json }))
@@ -338,6 +365,11 @@ impl Tool for RunTerminalTool {
                         "type": "boolean",
                         "description": "Allow potentially dangerous commands",
                         "default": false
+                    },
+                    "confirm": {
+                        "type": "boolean",
+                        "description": "Explicit confirmation for command execution",
+                        "default": false
                     }
                 }
             }),
@@ -355,6 +387,12 @@ impl Tool for RunTerminalTool {
     }
 
     fn execute(&self, input: &ToolInput) -> ToolOutput {
+        let policy = policy_of(input);
+        if !policy.allow_run_terminal {
+            return ToolOutput::error("run_terminal is disabled by policy")
+                .with_trace("policy_blocked".to_string());
+        }
+
         let args = &input.args;
 
         let command = match parse_string(args, "command") {
@@ -363,6 +401,16 @@ impl Tool for RunTerminalTool {
         };
 
         let allow_dangerous = parse_bool(args, "allow_dangerous").unwrap_or(false);
+
+        if policy.require_confirm_run_terminal {
+            let confirmed = parse_bool(args, "confirm").unwrap_or(false);
+            if !confirmed {
+                return ToolOutput::error(
+                    "run_terminal requires explicit confirmation: set confirm=true in args",
+                )
+                .with_trace("confirmation_required".to_string());
+            }
+        }
 
         match run_terminal(&command, Some(&input.repo_root), allow_dangerous) {
             Ok(result) => {

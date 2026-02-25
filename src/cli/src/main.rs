@@ -4,11 +4,11 @@ use clap::{Parser, Subcommand};
 use core::code_chunk::{ChunkOptions, IndexChunkOptions, RefillOptions};
 use intelligence::TreeSitterFile;
 use llm::LLMConfig;
-use react::{ReactOptions, render_prompt_context};
+use react::{render_prompt_context, ReactOptions};
 use std::path::PathBuf;
-use tokenizers::{Tokenizer, models::wordlevel::WordLevel, pre_tokenizers::whitespace::Whitespace};
-use tools::{build_context_pack_keyword, read_file, SearchCodeOptions, EditOp};
-use tools::{list_dir, edit_file, run_terminal};
+use tokenizers::{models::wordlevel::WordLevel, pre_tokenizers::whitespace::Whitespace, Tokenizer};
+use tools::{build_context_pack_keyword, read_file, EditOp, SearchCodeOptions};
+use tools::{edit_file, list_dir, run_terminal};
 
 fn demo_tokenizer() -> Tokenizer {
     let mut vocab = AHashMap::new();
@@ -74,6 +74,16 @@ enum Command {
         max_steps: usize,
     },
 
+    // (Dev)
+    #[command(hide = true)]
+    Dev {
+        #[command(subcommand)]
+        command: DevCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum DevCommand {
     /// List directory contents
     ListDir {
         /// Directory path
@@ -127,20 +137,43 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command.unwrap_or(Command::Demo) {
         Command::Demo => cmd_demo(),
-        Command::Search { repo_root, query, prompt, max_chunks } => {
-            cmd_search(repo_root, query, prompt, max_chunks)
-        }
-        Command::Ask { repo_root, question, show_prompt, max_chunks, react, max_steps } => {
-            cmd_ask(repo_root, question, show_prompt, max_chunks, react, max_steps)
-        }
-        Command::ListDir { path } => cmd_list_dir(path),
-        Command::ReadFile { path, start, end } => cmd_read_file(path, start, end),
-        Command::EditFile { path, start, end, content, backup } => {
-            cmd_edit_file(path, start, end, content, backup)
-        }
-        Command::RunTerminal { command, cwd, allow_dangerous } => {
-            cmd_run_terminal(command, cwd, allow_dangerous)
-        }
+        Command::Search {
+            repo_root,
+            query,
+            prompt,
+            max_chunks,
+        } => cmd_search(repo_root, query, prompt, max_chunks),
+        Command::Ask {
+            repo_root,
+            question,
+            show_prompt,
+            max_chunks,
+            react,
+            max_steps,
+        } => cmd_ask(
+            repo_root,
+            question,
+            show_prompt,
+            max_chunks,
+            react,
+            max_steps,
+        ),
+        Command::Dev { command } => match command {
+            DevCommand::ListDir { path } => cmd_list_dir(path),
+            DevCommand::ReadFile { path, start, end } => cmd_read_file(path, start, end),
+            DevCommand::EditFile {
+                path,
+                start,
+                end,
+                content,
+                backup,
+            } => cmd_edit_file(path, start, end, content, backup),
+            DevCommand::RunTerminal {
+                command,
+                cwd,
+                allow_dangerous,
+            } => cmd_run_terminal(command, cwd, allow_dangerous),
+        },
     }
 }
 
@@ -163,7 +196,8 @@ fn cmd_demo() -> Result<()> {
     let ts_file = TreeSitterFile::try_build(code.as_bytes(), "Rust")
         .map_err(|e| anyhow::anyhow!("Failed to parse: {:?}", e))?;
 
-    let scope_graph = ts_file.scope_graph()
+    let scope_graph = ts_file
+        .scope_graph()
         .map_err(|e| anyhow::anyhow!("Failed to build scope graph: {:?}", e))?;
 
     println!("\n Detected Symbols (Definitions):");
@@ -209,13 +243,22 @@ fn cmd_demo() -> Result<()> {
         IndexChunkOptions::default(),
         RefillOptions::default(),
     )?;
-    println!("    hits={} context={}", pack.hits.len(), pack.context.len());
+    println!(
+        "    hits={} context={}",
+        pack.hits.len(),
+        pack.context.len()
+    );
 
     println!("\n Demo finished successfully.");
     Ok(())
 }
 
-fn cmd_search(repo_root: PathBuf, query: Vec<String>, prompt: bool, max_chunks: usize) -> Result<()> {
+fn cmd_search(
+    repo_root: PathBuf,
+    query: Vec<String>,
+    prompt: bool,
+    max_chunks: usize,
+) -> Result<()> {
     let query = query.join(" ");
     if query.trim().is_empty() {
         anyhow::bail!("query cannot be empty");
@@ -321,6 +364,7 @@ fn cmd_ask(
                     max_chunks,
                     ..Default::default()
                 },
+                ..Default::default()
             },
         )?;
 
@@ -394,7 +438,10 @@ fn cmd_list_dir(path: PathBuf) -> Result<()> {
 
     for entry in entries {
         let type_str = if entry.is_dir { "DIR" } else { "FILE" };
-        let size_str = entry.size.map(|s| format!("{} B", s)).unwrap_or_else(|| "-".to_string());
+        let size_str = entry
+            .size
+            .map(|s| format!("{} B", s))
+            .unwrap_or_else(|| "-".to_string());
         println!("{:<40} {:<10} {:<10}", entry.name, type_str, size_str);
     }
 
@@ -414,14 +461,31 @@ fn cmd_read_file(path: PathBuf, start: Option<usize>, end: Option<usize>) -> Res
     Ok(())
 }
 
-fn cmd_edit_file(path: PathBuf, start: usize, end: usize, content: String, backup: bool) -> Result<()> {
+fn cmd_edit_file(
+    path: PathBuf,
+    start: usize,
+    end: usize,
+    content: String,
+    backup: bool,
+) -> Result<()> {
     println!("Editing: {:?}", path);
     println!("Lines: {}..={}", start, end);
     println!("Backup: {}", backup);
 
+    // Validate: CLI uses 1-based line numbers (minimum is 1)
+    if start == 0 || end == 0 {
+        anyhow::bail!("line numbers must be >= 1 (1-based)");
+    }
+    if start > end {
+        anyhow::bail!("start line must be <= end line");
+    }
+
+    let start0 = start - 1;
+    let end0 = end - 1;
+
     let op = EditOp::ReplaceLines {
-        start_line: start,
-        end_line: end,
+        start_line: start0,
+        end_line: end0,
         new_content: content,
     };
 
@@ -442,7 +506,11 @@ fn cmd_edit_file(path: PathBuf, start: usize, end: usize, content: String, backu
     Ok(())
 }
 
-fn cmd_run_terminal(command: Vec<String>, cwd: Option<PathBuf>, allow_dangerous: bool) -> Result<()> {
+fn cmd_run_terminal(
+    command: Vec<String>,
+    cwd: Option<PathBuf>,
+    allow_dangerous: bool,
+) -> Result<()> {
     let cmd_str = command.join(" ");
     println!("Running: {}", cmd_str);
     if let Some(dir) = &cwd {

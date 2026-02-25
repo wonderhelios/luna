@@ -5,11 +5,10 @@
 //! - State tracking
 //! - Context building
 
-
-use toolkit::Tool;
-use std::path::PathBuf;
 use std::fs;
+use std::path::PathBuf;
 use tempfile::TempDir;
+use toolkit::Tool;
 
 // Helper function to create a temporary test repository
 fn setup_test_repo() -> TempDir {
@@ -29,21 +28,23 @@ pub fn add(a: i32, b: i32) -> i32 {
     a + b
 }
 "#,
-    ).unwrap();
+    )
+    .unwrap();
 
     // Create a README
     fs::write(
         repo_path.join("README.md"),
         "# Test Repository\n\nThis is a test repository for ReAct agent integration tests.",
-    ).unwrap();
+    )
+    .unwrap();
 
     temp_dir
 }
 
 #[test]
 fn test_tool_registry() {
-    use toolkit::{Tool, ToolRegistry, ToolInput, ToolOutput};
-    use toolkit::{ReadFileTool, ListDirTool};
+    use toolkit::{ListDirTool, ReadFileTool};
+    use toolkit::{Tool, ToolInput, ToolOutput, ToolRegistry};
 
     let mut registry = ToolRegistry::new();
     registry.register(Box::new(ReadFileTool::new()));
@@ -56,8 +57,8 @@ fn test_tool_registry() {
 
 #[test]
 fn test_read_file_tool() {
-    use toolkit::{ReadFileTool, ToolInput};
     use std::path::PathBuf;
+    use toolkit::{ReadFileTool, ToolInput};
 
     let temp_dir = setup_test_repo();
     let test_file = temp_dir.path().join("src/lib.rs");
@@ -68,6 +69,7 @@ fn test_read_file_tool() {
             "path": "src/lib.rs",
         }),
         repo_root: temp_dir.path().to_path_buf(),
+        policy: None,
     };
 
     let output = tool.execute(&input);
@@ -91,6 +93,7 @@ fn test_list_dir_tool() {
             "path": "src",
         }),
         repo_root: temp_dir.path().to_path_buf(),
+        policy: None,
     };
 
     let output = tool.execute(&input);
@@ -103,9 +106,9 @@ fn test_list_dir_tool() {
 
 #[test]
 fn test_context_pack_building() {
-    use tools::{build_context_pack_keyword, SearchCodeOptions};
     use core::code_chunk::{IndexChunkOptions, RefillOptions};
     use tokenizers::Tokenizer;
+    use tools::{build_context_pack_keyword, SearchCodeOptions};
 
     let temp_dir = setup_test_repo();
 
@@ -134,9 +137,9 @@ fn test_context_pack_building() {
 
 #[test]
 fn test_search_functionality() {
-    use tools::{search_code_keyword, SearchCodeOptions};
     use core::code_chunk::IndexChunkOptions;
     use tokenizers::Tokenizer;
+    use tools::{search_code_keyword, SearchCodeOptions};
 
     let temp_dir = setup_test_repo();
 
@@ -176,11 +179,11 @@ fn test_file_edit_operations() {
     // Create test file
     fs::write(&test_file, "line 1\nline 2\nline 3\n").unwrap();
 
-    // Edit file - ReplaceLines uses 1-based line numbers
-    // Replace line 2 (1-based) with new content
+    // Edit file - ReplaceLines uses 0-based line numbers (inclusive)
+    // Replace line 1 (0-based, the second line) with new content
     let op = EditOp::ReplaceLines {
-        start_line: 2,
-        end_line: 2,
+        start_line: 1,
+        end_line: 1,
         new_content: "edited line".to_string(),
     };
 
@@ -189,8 +192,7 @@ fn test_file_edit_operations() {
     assert!(result.is_ok());
     let edit_result = result.unwrap();
     assert!(edit_result.success);
-    // lines_changed returns the total line count of the new file content
-    assert_eq!(edit_result.lines_changed, Some(3));
+    assert_eq!(edit_result.lines_changed, Some(1));
 
     // Verify the edit
     let content = fs::read_to_string(&test_file).unwrap();
@@ -200,19 +202,17 @@ fn test_file_edit_operations() {
 
 #[test]
 fn test_merge_hits() {
-    use react::merge_hits;
     use core::code_chunk::IndexChunk;
+    use react::merge_hits;
 
-    let base = vec![
-        IndexChunk {
-            path: "test.rs".to_string(),
-            start_byte: 0,
-            end_byte: 10,
-            start_line: 0,
-            end_line: 1,
-            text: "hello".to_string(),
-        },
-    ];
+    let base = vec![IndexChunk {
+        path: "test.rs".to_string(),
+        start_byte: 0,
+        end_byte: 10,
+        start_line: 0,
+        end_line: 1,
+        text: "hello".to_string(),
+    }];
 
     let more = vec![
         IndexChunk {
@@ -243,19 +243,17 @@ fn test_merge_hits() {
 
 #[test]
 fn test_summarize_state() {
-    use react::summarize_state;
     use core::code_chunk::ContextChunk;
+    use react::summarize_state;
 
-    let context = vec![
-        ContextChunk {
-            path: "test.rs".to_string(),
-            alias: 0,
-            snippet: "pub fn test() {}".to_string(),
-            start_line: 0,
-            end_line: 1,
-            reason: "test".to_string(),
-        },
-    ];
+    let context = vec![ContextChunk {
+        path: "test.rs".to_string(),
+        alias: 0,
+        snippet: "pub fn test() {}".to_string(),
+        start_line: 0,
+        end_line: 1,
+        reason: "test".to_string(),
+    }];
 
     let hits = vec![];
     let summary = summarize_state(&hits, &context);

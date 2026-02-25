@@ -1,7 +1,7 @@
 //! File system operations for agents
 
 use crate::detect_lang_id;
-use anyhow::Result;
+use crate::ToolResult;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
@@ -11,7 +11,7 @@ use std::path::Path;
 // ============================================================================
 
 /// Read file content, optionally with line range
-pub fn read_file(path: &Path, range: Option<(usize, usize)>) -> Result<String> {
+pub fn read_file(path: &Path, range: Option<(usize, usize)>) -> ToolResult<String> {
     let s = fs::read_to_string(path)?;
     if let Some((start, end)) = range {
         if start > end {
@@ -40,7 +40,7 @@ pub fn read_file_by_lines(
     rel_path: &str,
     start_line: usize,
     end_line: usize,
-) -> Result<String> {
+) -> ToolResult<String> {
     let full = repo_root.join(rel_path);
     read_file(&full, Some((start_line, end_line)))
 }
@@ -60,7 +60,7 @@ pub struct DirEntry {
 }
 
 /// List directory contents
-pub fn list_dir(path: &Path) -> Result<Vec<DirEntry>> {
+pub fn list_dir(path: &Path) -> ToolResult<Vec<DirEntry>> {
     let mut entries = Vec::new();
 
     for entry in fs::read_dir(path)? {
@@ -79,10 +79,7 @@ pub fn list_dir(path: &Path) -> Result<Vec<DirEntry>> {
     }
 
     // Sort: directories first, then alphabetically
-    entries.sort_by(|a, b| {
-        b.is_dir.cmp(&a.is_dir)
-            .then_with(|| a.name.cmp(&b.name))
-    });
+    entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.cmp(&b.name)));
 
     Ok(entries)
 }
@@ -96,7 +93,7 @@ pub fn list_dir(path: &Path) -> Result<Vec<DirEntry>> {
 pub enum EditOp {
     /// Replace entire file content
     ReplaceAll { new_content: String },
-    /// Replace specific line range (1-based, inclusive)
+    /// Replace specific line range (0-based, inclusive)
     ReplaceLines {
         start_line: usize,
         end_line: usize,
@@ -117,7 +114,7 @@ pub struct EditResult {
 }
 
 /// Edit file with automatic backup
-pub fn edit_file(path: &Path, op: &EditOp, create_backup: bool) -> Result<EditResult> {
+pub fn edit_file(path: &Path, op: &EditOp, create_backup: bool) -> ToolResult<EditResult> {
     let path_str = path.to_string_lossy().to_string();
 
     // Read original content
@@ -132,11 +129,17 @@ pub fn edit_file(path: &Path, op: &EditOp, create_backup: bool) -> Result<EditRe
         None
     };
 
-    let new_content = match op {
-        EditOp::ReplaceAll { new_content } => new_content.clone(),
-        EditOp::ReplaceLines { start_line, end_line, new_content } => {
-            let start = start_line.saturating_sub(1);
-            let end = end_line.saturating_sub(1);
+    let (new_content, lines_changed) = match op {
+        EditOp::ReplaceAll { new_content } => {
+            (new_content.clone(), Some(new_content.lines().count()))
+        }
+        EditOp::ReplaceLines {
+            start_line,
+            end_line,
+            new_content,
+        } => {
+            let start = *start_line;
+            let end = *end_line;
             let lines: Vec<&str> = original.lines().collect();
 
             if start >= lines.len() || end >= lines.len() || start > end {
@@ -149,7 +152,7 @@ pub fn edit_file(path: &Path, op: &EditOp, create_backup: bool) -> Result<EditRe
                 });
             }
 
-            let _lines_changed = end - start + 1;
+            let replaced_lines = end - start + 1;
             let new_lines: Vec<&str> = new_content.lines().collect();
 
             // Replace the line range
@@ -159,7 +162,7 @@ pub fn edit_file(path: &Path, op: &EditOp, create_backup: bool) -> Result<EditRe
                 new_lines_all.extend(lines[end + 1..].to_vec());
             }
 
-            new_lines_all.join("\n") + "\n"
+            (new_lines_all.join("\n") + "\n", Some(replaced_lines))
         }
         EditOp::UnifiedDiff { .. } => {
             return Ok(EditResult {
@@ -178,7 +181,7 @@ pub fn edit_file(path: &Path, op: &EditOp, create_backup: bool) -> Result<EditRe
     Ok(EditResult {
         path: path_str,
         success: true,
-        lines_changed: Some(new_content.lines().count()),
+        lines_changed,
         error: None,
         backup_path,
     })
@@ -236,17 +239,18 @@ pub struct SymbolDetail {
 pub fn list_symbols_enhanced(
     path: &Path,
     _options: &SymbolListOptions,
-) -> Result<Vec<SymbolDetail>> {
+) -> ToolResult<Vec<SymbolDetail>> {
     use intelligence::TreeSitterFile;
 
     let content = fs::read(path)?;
     let lang_id = detect_lang_id(path).unwrap_or("");
 
     let ts_file = TreeSitterFile::try_build(&content, lang_id)
-        .map_err(|e| anyhow::anyhow!("Failed to parse: {:?}", e))?;
+        .map_err(|e| crate::ToolError::Parse(format!("Failed to parse: {:?}", e)))?;
 
-    let scope_graph = ts_file.scope_graph()
-        .map_err(|e| anyhow::anyhow!("Failed to build scope graph: {:?}", e))?;
+    let scope_graph = ts_file
+        .scope_graph()
+        .map_err(|e| crate::ToolError::Parse(format!("Failed to build scope graph: {:?}", e)))?;
 
     let src_str = String::from_utf8_lossy(&content);
 
@@ -255,16 +259,20 @@ pub fn list_symbols_enhanced(
     for idx in scope_graph.graph.node_indices() {
         if let Some(intelligence::NodeKind::Def(def)) = scope_graph.get_node(idx) {
             let name = String::from_utf8_lossy(def.name(src_str.as_bytes())).to_string();
-            let kind = def.symbol_id
+            let kind = def
+                .symbol_id
                 .and_then(|id| {
                     // Get language from detection instead
                     let lang_id = detect_lang_id(path).unwrap_or("");
                     intelligence::ALL_LANGUAGES
                         .iter()
                         .find(|l| l.language_ids.contains(&lang_id))
-                        .and_then(|l| l.namespaces.get(id.namespace_idx)
-                            .and_then(|ns| ns.get(id.symbol_idx))
-                            .copied())
+                        .and_then(|l| {
+                            l.namespaces
+                                .get(id.namespace_idx)
+                                .and_then(|ns| ns.get(id.symbol_idx))
+                                .copied()
+                        })
                 })
                 .unwrap_or("unknown");
 
@@ -282,10 +290,7 @@ pub fn list_symbols_enhanced(
 }
 
 /// List symbols filtered by kind
-pub fn list_symbols_by_kind(
-    path: &Path,
-    kind: &str,
-) -> Result<Vec<SymbolDetail>> {
+pub fn list_symbols_by_kind(path: &Path, kind: &str) -> ToolResult<Vec<SymbolDetail>> {
     let options = SymbolListOptions {
         kinds: vec![kind.to_string()],
         ..Default::default()
@@ -295,7 +300,7 @@ pub fn list_symbols_by_kind(
 }
 
 /// List only public functions
-pub fn list_public_functions(path: &Path) -> Result<Vec<SymbolDetail>> {
+pub fn list_public_functions(path: &Path) -> ToolResult<Vec<SymbolDetail>> {
     let options = SymbolListOptions {
         visibility: SymbolVisibility::Public,
         kinds: vec!["function".to_string()],
