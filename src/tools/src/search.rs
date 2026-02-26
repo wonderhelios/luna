@@ -1,7 +1,6 @@
 //! Code search operations for agents
 
-use crate::detect_lang_id;
-use crate::{ToolResult, ToolTrace};
+use crate::{detect_lang_id, LunaError, Result, ToolTrace};
 use core::code_chunk::{ContextChunk, IndexChunk, IndexChunkOptions, RefillOptions};
 use index;
 use intelligence::TreeSitterFile;
@@ -15,10 +14,9 @@ use tokenizers::Tokenizer;
 // Search Backend Abstraction
 // ============================================================================
 
-/// Search backend abstraction: decouples placeholder keyword search from future vector/hybrid search.
+/// 搜索后端抽象：用于把“占位关键词检索”与未来的“向量/混合检索”解耦。
 ///
-/// Constraint: Regardless of backend changes, must produce a unified `IndexChunk` hit protocol
-/// for use by Refill/ContextEngine.
+/// 约束：无论后端如何变化，都应产出统一的 `IndexChunk` 命中协议，供 Refill/ContextEngine 使用。
 pub trait SearchBackend: Send + Sync {
     fn search(
         &self,
@@ -27,10 +25,10 @@ pub trait SearchBackend: Send + Sync {
         tokenizer: &Tokenizer,
         idx_opt: IndexChunkOptions,
         opt: SearchCodeOptions,
-    ) -> ToolResult<(Vec<IndexChunk>, Vec<ToolTrace>)>;
+    ) -> Result<(Vec<IndexChunk>, Vec<ToolTrace>)>;
 }
 
-/// Keyword placeholder search backend: scans repo files, matches query terms, and normalizes hits using `IndexChunk`.
+/// 关键词占位检索后端：扫描仓库文件，匹配 query terms，并用 `IndexChunk` 规范化命中。
 #[derive(Debug, Clone, Default)]
 pub struct KeywordSearchBackend;
 
@@ -42,7 +40,7 @@ impl SearchBackend for KeywordSearchBackend {
         tokenizer: &Tokenizer,
         idx_opt: IndexChunkOptions,
         opt: SearchCodeOptions,
-    ) -> ToolResult<(Vec<IndexChunk>, Vec<ToolTrace>)> {
+    ) -> Result<(Vec<IndexChunk>, Vec<ToolTrace>)> {
         let mut trace = Vec::new();
         let q = query.trim();
 
@@ -202,7 +200,7 @@ pub fn search_code_keyword(
     tokenizer: &Tokenizer,
     idx_opt: IndexChunkOptions,
     opt: SearchCodeOptions,
-) -> ToolResult<(Vec<IndexChunk>, Vec<ToolTrace>)> {
+) -> Result<(Vec<IndexChunk>, Vec<ToolTrace>)> {
     KeywordSearchBackend::default().search(repo_root, query, tokenizer, idx_opt, opt)
 }
 
@@ -215,7 +213,7 @@ pub fn refill_hits(
     repo_root: &Path,
     hits: &[IndexChunk],
     opt: RefillOptions,
-) -> ToolResult<(Vec<ContextChunk>, Vec<ToolTrace>)> {
+) -> Result<(Vec<ContextChunk>, Vec<ToolTrace>)> {
     let mut trace = Vec::new();
     let mut context = Vec::new();
 
@@ -234,7 +232,7 @@ pub fn refill_hits(
 
         // Refill using index module
         let mut file_context = index::refill_chunks(&path, &src, lang_id, &file_hits, opt.clone())
-            .map_err(|e| crate::ToolError::search_failed(format!("refill failed for {}: {:?}", path, e)))?;
+            .map_err(|e| LunaError::search(format!("refill failed for {}: {:?}", path, e)))?;
 
         context.append(&mut file_context);
     }
@@ -269,7 +267,7 @@ pub fn find_symbol_definitions(
     repo_root: &Path,
     symbol_name: &str,
     max_results: usize,
-) -> ToolResult<Vec<SymbolLocation>> {
+) -> Result<Vec<SymbolLocation>> {
     let mut results = Vec::new();
 
     for entry in walkdir::WalkDir::new(repo_root)
@@ -286,7 +284,7 @@ pub fn find_symbol_definitions(
             path.is_file() && detect_lang_id(path).is_some()
         })
     {
-        let entry = entry.map_err(|e| crate::ToolError::search_failed(format!("walk error: {}", e)))?;
+        let entry = entry.map_err(|e| LunaError::search(format!("walk error: {}", e)))?;
         let path = entry.path();
 
         if results.len() >= max_results {

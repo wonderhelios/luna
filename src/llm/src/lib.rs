@@ -1,36 +1,20 @@
 //! LLM Adapter Layer
-//!
-//! This module provides a unified interface for interacting with various
-//! LLM providers (OpenAI-compatible, DeepSeek, GLM, etc.).
-//!
-//! Design Principles:
-//! - Provider-agnostic: Support multiple LLM providers through a common interface
-//! - Simple blocking API for now (streaming can be added later)
-//! - Environment-based configuration
-//! - Clear error messages
 
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use std::env;
+use std::time::Duration;
 
-// ============================================================================
-// Configuration
-// ============================================================================
-
-/// LLM provider configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LLMConfig {
-    /// API base URL (e.g., "https://api.openai.com/v1")
     pub api_base: String,
-
-    /// API key for authentication
     pub api_key: String,
-
-    /// Model identifier (e.g., "gpt-4", "deepseek-chat")
     pub model: String,
-
-    /// Sampling temperature (0.0 - 2.0)
     pub temperature: f32,
+    pub max_tokens: Option<usize>,
+    pub timeout_secs: u64,
+    pub max_retries: usize,
+    pub retry_delay_ms: u64,
 }
 
 impl Default for LLMConfig {
@@ -40,18 +24,15 @@ impl Default for LLMConfig {
             api_key: String::new(),
             model: "glm-4-flash".to_string(),
             temperature: 0.2,
+            max_tokens: None,
+            timeout_secs: 120,
+            max_retries: 3,
+            retry_delay_ms: 1000,
         }
     }
 }
 
 impl LLMConfig {
-    /// Read config from environment variables
-    ///
-    /// Environment variables:
-    /// - `LLM_API_BASE`: API base URL (optional, uses default if not set)
-    /// - `LLM_API_KEY`: API key (required)
-    /// - `LLM_MODEL`: Model name (optional, uses default if not set)
-    /// - `LLM_TEMPERATURE`: Temperature (optional, uses default if not set)
     pub fn from_env() -> Result<Self> {
         let mut cfg = Self::default();
 
@@ -73,20 +54,16 @@ impl LLMConfig {
             }
         }
 
-        cfg.api_key = env::var("LLM_API_KEY")
-            .map_err(|_| anyhow!("missing environment var: LLM_API_KEY"))?;
+        cfg.api_key =
+            env::var("LLM_API_KEY").map_err(|_| anyhow!("missing environment var: LLM_API_KEY"))?;
 
         if cfg.api_key.trim().is_empty() {
-            anyhow::bail!("LLM_API_KEY is empty!");
+            anyhow::bail!("LLM_API_KEY_KEY is empty!");
         }
 
         Ok(cfg)
     }
 }
-
-// ============================================================================
-// API Types
-// ============================================================================
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ChatMessage {
@@ -112,10 +89,6 @@ struct ChatChoice {
     message: ChatMessage,
 }
 
-// ============================================================================
-// Client
-// ============================================================================
-
 pub struct LLMClient {
     config: LLMConfig,
 }
@@ -129,11 +102,36 @@ impl LLMClient {
         Ok(Self::new(LLMConfig::from_env()?))
     }
 
-    /// Send a chat completion request
     pub fn chat(&self, messages: Vec<(String, String)>) -> Result<String> {
+        let mut last_error: Option<String> = None;
+
+        for attempt in 0..self.config.max_retries {
+            match self.chat_attempt(&messages) {
+                Ok(response) => return Ok(response),
+                Err(e) => {
+                    last_error = Some(format!("{}", e));
+
+                    if attempt < self.config.max_retries - 1 {
+                        let delay = Duration::from_millis(self.config.retry_delay_ms);
+                        std::thread::sleep(delay);
+                    }
+                }
+            }
+        }
+
+        match last_error {
+            Some(err) => Err(anyhow!(err)),
+            None => Err(anyhow!("All retries exhausted")),
+        }
+    }
+
+    fn chat_attempt(&self, messages: &[(String, String)]) -> Result<String> {
         let chat_messages: Vec<ChatMessage> = messages
             .into_iter()
-            .map(|(role, content)| ChatMessage { role, content })
+            .map(|(role, content)| ChatMessage {
+                role: role.clone(),
+                content: content.clone(),
+            })
             .collect();
 
         let req = ChatCompletionRequest {
@@ -143,9 +141,14 @@ impl LLMClient {
             stream: false,
         };
 
-        let url = format!("{}/chat/completions", self.config.api_base.trim_end_matches('/'));
+        let url = format!(
+            "{}/chat/completions",
+            self.config.api_base.trim_end_matches('/')
+        );
+
+        let timeout = Duration::from_secs(self.config.timeout_secs);
         let client = reqwest::blocking::Client::builder()
-            .timeout(std::time::Duration::from_secs(120))
+            .timeout(timeout)
             .build()?;
 
         let resp = client
@@ -173,7 +176,6 @@ impl LLMClient {
         Ok(content)
     }
 
-    /// Convenience method for system + user message
     pub fn chat_system_user(&self, system: &str, user: &str) -> Result<String> {
         self.chat(vec![
             ("system".to_string(), system.to_string()),
@@ -182,19 +184,10 @@ impl LLMClient {
     }
 }
 
-// ============================================================================
-// Convenience Functions
-// ============================================================================
-
-/// Create a client from config and send a chat request
 pub fn llm_chat(cfg: &LLMConfig, system: &str, user: &str) -> Result<String> {
     let client = LLMClient::new(cfg.clone());
     client.chat_system_user(system, user)
 }
-
-// ============================================================================
-// Tests
-// ============================================================================
 
 #[cfg(test)]
 mod tests {

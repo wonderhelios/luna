@@ -6,6 +6,7 @@
 //! - State tracking
 //! - Loop termination
 
+use super::safety::ReActSafetyState;
 use crate::context::{render_prompt_context, ContextEngineOptions};
 use crate::planner::{
     expand_seed_terms, extract_first_json_object, plan_prompt, ReActAction, ReActStepTrace,
@@ -104,14 +105,12 @@ impl ReactAgent {
             trace,
         };
 
-        let mut no_delta_searches = 0usize;
-        let mut last_search_query: Option<String> = None;
-        let mut last_edit: Option<(String, usize, usize)> = None;
+        let mut safety = ReActSafetyState::default();
 
         // ReAct loop
         for step in 0..self.options.max_steps.max(1) {
-            // Auto-exit if no delta after multiple searches
-            if no_delta_searches >= 2 && !context.is_empty() {
+            // Auto-exit if safety suggests we should directly answer
+            if safety.should_auto_answer(!context.is_empty()) {
                 pack.hits = hits.clone();
                 pack.context = context.clone();
 
@@ -167,16 +166,12 @@ impl ReactAgent {
                             "Edit skipped: code exists in context, using answer instead.\n",
                         );
                         Some(ReActAction::Answer)
-                    } else if let Some((last_path, last_start, last_end)) = &last_edit {
-                        if path == last_path && start_line == last_start && end_line == last_end {
-                            observation.push_str(&format!(
-                                "duplicate edit skipped: already edited {}:{}..={} in previous step. Moving to answer.\n",
-                                path, start_line, end_line
-                            ));
-                            Some(ReActAction::Answer)
-                        } else {
-                            action.clone()
-                        }
+                    } else if safety.is_duplicate_edit(path, *start_line, *end_line) {
+                        observation.push_str(&format!(
+                            "duplicate edit skipped: already edited {}:{}..={} in previous step. Moving to answer.\n",
+                            path, start_line, end_line
+                        ));
+                        Some(ReActAction::Answer)
                     } else {
                         action.clone()
                     }
@@ -194,9 +189,6 @@ impl ReactAgent {
                     } else {
                         let before_hits = hits.len();
                         let before_ctx = context.len();
-                        let repeated = last_search_query
-                            .as_deref()
-                            .is_some_and(|last| last.eq_ignore_ascii_case(q));
 
                         let (more, t) = search_code_keyword(
                             repo_root,
@@ -215,13 +207,8 @@ impl ReactAgent {
                         context = ctx;
                         let after_hits = hits.len();
                         let after_ctx = context.len();
-                        let no_delta = before_hits == after_hits && before_ctx == after_ctx;
-                        if no_delta {
-                            no_delta_searches += 1;
-                        } else {
-                            no_delta_searches = 0;
-                        }
-                        last_search_query = Some(q.to_string());
+                        let had_delta = before_hits != after_hits || before_ctx != after_ctx;
+                        let (repeated, no_delta) = safety.record_search(q, had_delta);
 
                         observation.push_str(&format!(
                             "search ok: hits={} context={}{}",
@@ -256,6 +243,7 @@ impl ReactAgent {
                         );
                         continue;
                     }
+
                     let file_path = repo_root.join(&path);
                     let op = EditOp::ReplaceLines {
                         start_line,
@@ -266,7 +254,7 @@ impl ReactAgent {
                     match edit_file(&file_path, &op, create_backup) {
                         Ok(result) => {
                             if result.success {
-                                last_edit = Some((path.clone(), start_line, end_line));
+                                safety.record_edit(path.clone(), start_line, end_line);
 
                                 let preview_start = start_line.saturating_sub(3);
                                 let preview_end = start_line + 3;
@@ -313,8 +301,7 @@ impl ReactAgent {
                                 end_line: preview_end,
                                 reason: format!(
                                     "EDITED: lines {}..={} (modified content)",
-                                    start_line + 1,
-                                    end_line + 1
+                                    start_line, end_line
                                 ),
                             };
                             context.insert(0, edited_chunk);
@@ -367,7 +354,7 @@ impl ReactAgent {
                         self.options.context_engine.clone(),
                     )?;
 
-                    if let Some((edited_path, edited_start, edited_end)) = &last_edit {
+                    if let Some((edited_path, edited_start, edited_end)) = &safety.last_edit {
                         let file_path = repo_root.join(edited_path);
                         let preview_start = edited_start.saturating_sub(10);
                         let preview_end = edited_end + 10;

@@ -15,7 +15,8 @@ use serde::{Deserialize, Serialize};
 ///
 /// The LLM must output a JSON object with an "action" field:
 /// - Search: {"action":"search","query":"keywords"}
-/// - Edit: {"action":"edit_file","path":"...","start_line":N,"end_line":N,"new_content":"..."}
+/// - Edit: {"action":"edit_file","path":"...","start_line":N,"end_line":N,"new_content":"...","confirm":true}
+///   说明：start_line/end_line 为 0-based，且 end_line 为包含式。
 /// - Answer: {"action":"answer"}
 /// - Stop: {"action":"stop","reason":"..."}
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,13 +60,13 @@ pub fn plan_prompt(question: &str, state_summary: &str) -> (String, String) {
 
 Actions:
 - {"action":"search","query":"keywords"}
-- {"action":"edit_file","path":"...","start_line":N,"end_line":N,"new_content":"...","create_backup":true}
+- {"action":"edit_file","path":"...","start_line":N,"end_line":N,"new_content":"...","create_backup":true,"confirm":true}  // 0-based, inclusive
 - {"action":"answer"}
 - {"action":"stop","reason":"..."}
 
 Rules:
 - Output ONLY the JSON object, no markdown
-- For edit_file: lines are 0-based, start_line equals end_line (single line)
+- For edit_file: start_line equals end_line (single line)
 - When state shows the code → answer
 - When state shows NO code → search"#;
 

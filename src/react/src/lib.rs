@@ -31,7 +31,6 @@ use toolkit::{
     EditFileTool, ExecutionPolicy, ListDirTool, ReadFileTool, RunTerminalTool, ToolInput,
 };
 use toolkit::{ToolOutput, ToolRegistry, ToolSchema};
-use tools::SearchCodeOptions;
 
 use core::code_chunk::{ContextChunk, IndexChunk};
 use std::collections::BTreeMap;
@@ -112,38 +111,80 @@ pub fn summarize_state(hits: &[IndexChunk], context: &[ContextChunk]) -> String 
 // Definition Extraction
 // ============================================================================
 
+/// Definition patterns for extracting names from code snippets
+///
+/// Each pattern contains:
+/// - prefix: the keyword pattern to match (e.g., "pub fn ")
+/// - skip_generic: whether to skip generic parameters after the name
+struct DefPattern {
+    prefixes: &'static [&'static str],
+    skip_generic: bool,
+}
+
+static DEF_PATTERNS: &[DefPattern] = &[
+    // Rust-style definitions
+    DefPattern {
+        prefixes: &["pub struct ", "struct "],
+        skip_generic: true, // struct Foo<T> { ... }
+    },
+    DefPattern {
+        prefixes: &["pub enum ", "enum "],
+        skip_generic: true, // enum Foo<T> { ... }
+    },
+    DefPattern {
+        prefixes: &["pub fn ", "fn ", "async fn ", "pub async fn "],
+        skip_generic: true, // fn foo<T>() { ... }
+    },
+    DefPattern {
+        prefixes: &["pub trait ", "trait "],
+        skip_generic: true,
+    },
+    DefPattern {
+        prefixes: &["pub type ", "type "],
+        skip_generic: false,
+    },
+    DefPattern {
+        prefixes: &["pub const ", "const "],
+        skip_generic: false,
+    },
+    DefPattern {
+        prefixes: &["pub static ", "static "],
+        skip_generic: false,
+    },
+    DefPattern {
+        prefixes: &["pub impl ", "impl "],
+        skip_generic: true, // impl<T> Foo<T> { ... }
+    },
+    // C-style definitions
+    DefPattern {
+        prefixes: &["class ", "public class ", "private class ", "protected class "],
+        skip_generic: true,
+    },
+    DefPattern {
+        prefixes: &["def "], // Python
+        skip_generic: false,
+    },
+    DefPattern {
+        prefixes: &["function ", "export function "], // JavaScript/TypeScript
+        skip_generic: false,
+    },
+    DefPattern {
+        prefixes: &["func "], // Go
+        skip_generic: false,
+    },
+];
+
 /// Extract the name of a definition from a ContextChunk
+///
+/// Uses AST-aware pattern matching to identify definition names
+/// without requiring a full parse.
 fn extract_definition_name(chunk: &ContextChunk) -> Option<String> {
-    let snippet = chunk.snippet.trim();
-    let snippet_lower = snippet.to_lowercase();
+    let snippet = chunk.snippet.trim_start();
 
-    let patterns = [
-        ("pub struct ", "struct "),
-        ("pub enum ", "enum "),
-        ("pub fn ", "fn "),
-        ("trait ", "trait "),
-        ("type ", "type "),
-    ];
-
-    for (full_pattern, short_pattern) in patterns {
-        if let Some(pos) = snippet_lower.find(full_pattern) {
-            let after = snippet[pos + full_pattern.len()..].trim();
-            let name: String = after
-                .chars()
-                .take_while(|c| c.is_alphanumeric() || *c == '_')
-                .collect();
-            if !name.is_empty() {
-                return Some(name);
-            }
-        }
-        if let Some(pos) = snippet_lower.find(short_pattern) {
-            let after = snippet[pos + short_pattern.len()..].trim();
-            let name: String = after
-                .chars()
-                .take_while(|c| c.is_alphanumeric() || *c == '_')
-                .collect();
-            if !name.is_empty() {
-                return Some(name);
+    for pattern in DEF_PATTERNS {
+        for &prefix in pattern.prefixes {
+            if let Some(after_prefix) = snippet.strip_prefix(prefix) {
+                return Some(extract_identifier(after_prefix, pattern.skip_generic));
             }
         }
     }
@@ -151,18 +192,47 @@ fn extract_definition_name(chunk: &ContextChunk) -> Option<String> {
     None
 }
 
+/// Extract an identifier from the start of a string
+///
+/// Handles:
+/// - Generic parameters: `Foo<T, U>` extracts `Foo`
+/// - Method receivers: `fn foo(&self)` extracts `foo`
+/// - Qualified names: `impl Foo for Bar` extracts `Foo`
+fn extract_identifier(s: &str, skip_generic: bool) -> String {
+    let s = s.trim_start();
+
+    // Find the end of the identifier
+    let mut end = 0;
+    for (i, c) in s.char_indices() {
+        if c.is_alphanumeric() || c == '_' {
+            end = i + c.len_utf8();
+        } else if c == '<' && skip_generic {
+            // Found generic parameter start, stop here
+            break;
+        } else if c == '(' || c == '{' || c == ':' || c == ' ' || c == '<' {
+            // End of identifier
+            break;
+        } else {
+            // Skip other characters (like & for self)
+            break;
+        }
+    }
+
+    s[..end].to_string()
+}
+
 /// Check if a ContextChunk appears to contain a type/function definition
+///
+/// Uses the same pattern set as `extract_definition_name` for consistency.
 fn is_definition_chunk(chunk: &ContextChunk) -> bool {
-    let snippet_lower = chunk.snippet.to_lowercase();
-    snippet_lower.contains("pub struct")
-        || snippet_lower.contains("struct ")
-        || snippet_lower.contains("pub enum")
-        || snippet_lower.contains("enum ")
-        || snippet_lower.contains("pub fn")
-        || snippet_lower.contains("fn ")
-        || snippet_lower.contains("impl ")
-        || snippet_lower.contains("trait ")
-        || snippet_lower.contains("type ")
+    let snippet = chunk.snippet.trim_start();
+
+    DEF_PATTERNS.iter().any(|pattern| {
+        pattern
+            .prefixes
+            .iter()
+            .any(|&prefix| snippet.starts_with(prefix))
+    })
 }
 
 // ============================================================================
@@ -183,12 +253,11 @@ pub fn merge_hits(mut base: Vec<IndexChunk>, more: Vec<IndexChunk>) -> Vec<Index
 // Runtime Facade (External Entry Point)
 // ============================================================================
 
-/// Luna Runtime Facade: Unified external entry point aggregating tool registry,
-/// tokenizer, LLM configuration, and ReAct options.
+/// Luna 运行时门面：收敛对外入口，统一聚合工具注册表 + tokenizer + LLM 配置 + ReAct options。
 ///
-/// Design goals:
-/// - Future `luna-server (MCP)` depends only on this layer, no need to assemble crates manually.
-/// - Allows swapping retrieval backends/strategies without affecting the external API.
+/// 设计目标：
+/// - 未来 `luna-server (MCP)` 只依赖这一层，不需要直接拼装各个 crate。
+/// - 允许后续替换检索后端/策略边界，而不影响对外 API。
 pub struct LunaRuntime {
     registry: ToolRegistry,
     policy: ExecutionPolicy,
@@ -198,6 +267,11 @@ pub struct LunaRuntime {
 }
 
 impl LunaRuntime {
+    /// 创建默认 runtime，并注册基础工具。
+    ///
+    /// 说明：
+    /// - `search_code/refill` 仍通过 `tools`/`react` 内部调用，不在这里暴露为 ToolRegistry 工具；
+    ///   MCP 版本可以在 server 层决定如何把它们暴露为 tools。
     pub fn new(
         tokenizer: Tokenizer,
         llm_cfg: LLMConfig,
@@ -241,7 +315,7 @@ impl LunaRuntime {
         self.registry.execute(name, &input)
     }
 
-    /// Answer question using ReAct (internally runs search/refill/context/answer)
+    /// 以 ReAct 方式回答问题（内部会走 search/refill/context/answer）。
     pub fn ask_react(
         &self,
         repo_root: &std::path::Path,
@@ -256,16 +330,21 @@ impl LunaRuntime {
         )
     }
 
-    /// Directly expose the placeholder search entry point for server/MCP layer to do finer-grained tool decomposition
+    /// 直接暴露“占位检索”的调用点，便于 server/MCP 层做更细粒度的工具拆分。
     pub fn search_code_keyword(
         &self,
         repo_root: &std::path::Path,
         query: &str,
         idx_opt: core::code_chunk::IndexChunkOptions,
-        opt: SearchCodeOptions,
+        opt: tools::SearchCodeOptions,
     ) -> anyhow::Result<(Vec<core::code_chunk::IndexChunk>, Vec<tools::ToolTrace>)> {
-        tools::search_code_keyword(repo_root, query, &self.tokenizer, idx_opt, opt)
-            .map_err(|e| anyhow::anyhow!("{}", e))
+        Ok(tools::search_code_keyword(
+            repo_root,
+            query,
+            &self.tokenizer,
+            idx_opt,
+            opt,
+        )?)
     }
 
     pub fn refill_hits(
@@ -274,8 +353,7 @@ impl LunaRuntime {
         hits: &[core::code_chunk::IndexChunk],
         opt: core::code_chunk::RefillOptions,
     ) -> anyhow::Result<(Vec<core::code_chunk::ContextChunk>, Vec<tools::ToolTrace>)> {
-        tools::refill_hits(repo_root, hits, opt)
-            .map_err(|e| anyhow::anyhow!("{}", e))
+        Ok(tools::refill_hits(repo_root, hits, opt)?)
     }
 }
 

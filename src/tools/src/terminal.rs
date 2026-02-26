@@ -1,6 +1,6 @@
 //! Terminal command execution for agents
 
-use crate::ToolResult;
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::process::Command;
@@ -41,9 +41,9 @@ const DANGEROUS_PATTERNS: &[&str] = &[
 /// Check if a command appears dangerous
 fn is_dangerous_command(command: &str) -> bool {
     let cmd_lower = command.to_lowercase();
-    DANGEROUS_PATTERNS.iter().any(|pattern| {
-        cmd_lower.contains(&pattern.to_lowercase())
-    })
+    DANGEROUS_PATTERNS
+        .iter()
+        .any(|pattern| cmd_lower.contains(&pattern.to_lowercase()))
 }
 
 /// Run a terminal command with safety checks
@@ -59,7 +59,7 @@ pub fn run_terminal(
     command: &str,
     cwd: Option<&Path>,
     allow_dangerous: bool,
-) -> ToolResult<TerminalResult> {
+) -> Result<TerminalResult> {
     let command = command.trim();
 
     if command.is_empty() {

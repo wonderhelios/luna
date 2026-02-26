@@ -8,13 +8,12 @@
 //! - `search`: Code search operations
 //! - `terminal`: Terminal command execution
 
-pub mod error;
 pub mod fs;
 pub mod search;
 pub mod terminal;
 
-// Re-export error types
-pub use error::{ToolError, ToolResult};
+// Re-export error type
+pub use error::LunaError;
 
 // Re-export commonly used types
 pub use fs::{edit_file, list_dir, read_file, DirEntry, EditOp, EditResult};
@@ -23,17 +22,36 @@ pub use terminal::{run_terminal, TerminalResult};
 
 use core::code_chunk::{ContextChunk, IndexChunk, IndexChunkOptions};
 use intelligence::ALL_LANGUAGES;
+use once_cell::sync::Lazy;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::Path;
+
+/// Result type alias for tools operations
+pub type Result<T> = error::Result<T>;
 
 // ============================================================================
 // Common Types
 // ============================================================================
 
+/// Simple trace record for tool executions
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolTrace {
     pub tool: String,
     pub summary: String,
+}
+
+/// Minimal context pack for LLM/frontend (Context Engine input/output carrier)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContextPack {
+    pub query: String,
+    /// Retrieval hit protocol, to be replaced with vector/hybrid retrieval
+    pub hits: Vec<IndexChunk>,
+    /// Readable context entering prompt (refilled function/class-level context)
+    pub context: Vec<ContextChunk>,
+    /// Tool call trace (for debugging/explainability)
+    pub trace: Vec<ToolTrace>,
 }
 
 // ============================================================================
@@ -56,20 +74,14 @@ pub fn detect_lang_id(path: &Path) -> Option<&'static str> {
 
 /// Extract code identifiers from a natural language query.
 ///
-/// This helps when users ask questions like "what is context_chunks?"
-/// by extracting "context_chunks" for code search.
-///
 /// Extracts:
 /// - snake_case identifiers (e.g., `context_chunks`, `my_function`)
 /// - camelCase identifiers (e.g., `contextChunks`, `myFunction`)
 /// - PascalCase identifiers (e.g., `ContextChunk`, `MyClass`)
 pub fn extract_code_identifiers(query: &str) -> Vec<String> {
-    use once_cell::sync::Lazy;
-    use regex::Regex;
-
-    // Use Lazy to cache compiled regexes, ensuring:
-    // - Only compiled once
-    // - Avoid repeated allocation/compilation on each call
+    // Regex 编译开销不低，这里用 Lazy 缓存编译结果，保证：
+    // - 只编译一次
+    // - 避免每次调用重复分配/编译
     static SNAKE_RE: Lazy<Regex> = Lazy::new(|| {
         Regex::new(r"[a-zA-Z_][a-zA-Z0-9_]{2,}").expect("internal regex must be valid")
     });
@@ -90,7 +102,7 @@ pub fn extract_code_identifiers(query: &str) -> Vec<String> {
 
     for cap in CAMEL_RE.find_iter(query) {
         let s = cap.as_str();
-        if !identifiers.contains(&s.to_string()) {
+        if !identifiers.iter().any(|existing| existing == s) {
             identifiers.push(s.to_string());
         }
     }
@@ -99,20 +111,8 @@ pub fn extract_code_identifiers(query: &str) -> Vec<String> {
 }
 
 // ============================================================================
-// Context Pack
+// Context Pack Builder
 // ============================================================================
-
-/// Minimal context pack for LLM/frontend (Context Engine input/output carrier)
-#[derive(Debug, Clone)]
-pub struct ContextPack {
-    pub query: String,
-    /// Retrieval hit protocol, to be replaced with vector/hybrid retrieval
-    pub hits: Vec<IndexChunk>,
-    /// Readable context entering prompt (refilled function/class-level context)
-    pub context: Vec<ContextChunk>,
-    /// Tool call trace (for debugging/explainability)
-    pub trace: Vec<ToolTrace>,
-}
 
 /// Build context pack using keyword search + refill
 pub fn build_context_pack_keyword(
@@ -122,7 +122,7 @@ pub fn build_context_pack_keyword(
     search_opt: SearchCodeOptions,
     index_opt: IndexChunkOptions,
     refill_opt: core::code_chunk::RefillOptions,
-) -> ToolResult<ContextPack> {
+) -> Result<ContextPack> {
     // Determine if this is a natural language query (contains non-ASCII chars or spaces)
     let is_natural_language = query.chars().any(|c| c.is_alphabetic() && !c.is_ascii());
 
@@ -154,7 +154,7 @@ pub fn build_context_pack_keyword(
     }
 
     // Deduplicate hits
-    let mut uniq_hits = std::collections::BTreeMap::new();
+    let mut uniq_hits: BTreeMap<(String, usize, usize), IndexChunk> = BTreeMap::new();
     for h in all_hits {
         let key = (h.path.clone(), h.start_byte, h.end_byte);
         uniq_hits.entry(key).or_insert(h);
