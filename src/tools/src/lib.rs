@@ -17,7 +17,9 @@ pub use error::LunaError;
 
 // Re-export commonly used types
 pub use fs::{edit_file, list_dir, read_file, DirEntry, EditOp, EditResult};
-pub use search::{refill_hits, search_code_keyword, SearchCodeOptions};
+pub use search::{
+    find_symbol_definitions, refill_hits, search_code_keyword, SearchCodeOptions, SymbolLocation,
+};
 pub use terminal::{run_terminal, TerminalResult};
 
 use core::code_chunk::{ContextChunk, IndexChunk, IndexChunkOptions};

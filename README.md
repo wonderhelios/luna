@@ -4,7 +4,7 @@
 
 [![Rust](https://img.shields.io/badge/rust-2021-orange.svg)](https://www.rust-lang.org)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Status](https://img.shields.io/badge/status-M2%20Smart%20Reader-yellow.svg)]()
+[![Status](https://img.shields.io/badge/status-M3%20Junior%20Coder-yellow.svg)]()
 
 Luna reads code like a senior engineer—understanding symbols, scopes, and relationships through Tree-sitter AST analysis—then reasons, searches, and edits with contextual awareness via the ReAct agent loop.
 
@@ -12,8 +12,9 @@ Luna reads code like a senior engineer—understanding symbols, scopes, and rela
 
 ## Key Features
 
+- **Symbol Navigation** — Go-to-definition, automatic symbol resolution, cross-file reference finding
 - **Deterministic Analysis** — Tree-sitter AST + Scope Graph for precise symbol understanding, not LLM guessing
-- **Smart Context Pipeline** — IndexChunk for retrieval, ContextChunk for LLM, refined via Refill
+- **Smart Context Pipeline** — IndexChunk for retrieval, ContextChunk for LLM, refined via Refill with auto symbol injection
 - **Enforced Safety** — Hard constraints on dangerous commands and duplicate edits
 - **Language Agnostic** — One core algorithm, 12+ languages via Tree-sitter grammars
 - **Native Performance** — Rust-powered, no GIL or event loop bottlenecks
@@ -81,8 +82,8 @@ let (answer, context, traces) = runtime.ask_react(
 | Milestone | Status | Description |
 |-----------|--------|-------------|
 | **M1: Hello Agent** | ✅ Done | ReAct loop, core tools, Context Engine |
-| **M2: Smart Reader** | 🚧 Active | Symbol analysis, scope resolution, go-to-definition |
-| **M3: Junior Coder** | 📅 Planned | Auto-fix compile errors, test-driven repair |
+| **M2: Smart Reader** | ✅ Done | Symbol analysis, scope resolution, go-to-definition |
+| **M3: Junior Coder** | 🚧 Active | Auto-fix compile errors, test-driven repair |
 | **M4: IDE Integration** | 📅 Planned | MCP Server, VSCode extension |
 | **M5: Senior Mode** | 📅 Planned | Vector search, Repo Map Ranking |
 

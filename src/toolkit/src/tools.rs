@@ -9,7 +9,7 @@ use crate::{
 use serde_json::json;
 
 // Import functions from the tools crate
-use tools::{edit_file, list_dir, read_file, run_terminal, EditOp};
+use tools::{edit_file, find_symbol_definitions, list_dir, read_file, run_terminal, EditOp};
 
 fn policy_of(input: &ToolInput) -> crate::ExecutionPolicy {
     input.policy.clone().unwrap_or_default()
@@ -435,6 +435,106 @@ impl Tool for RunTerminalTool {
 }
 
 // ============================================================================
+// Goto Definition Tool
+// ============================================================================
+
+/// Tool for finding symbol definitions (go-to-definition)
+pub struct GotoDefinitionTool;
+
+impl GotoDefinitionTool {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for GotoDefinitionTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Tool for GotoDefinitionTool {
+    fn name(&self) -> &str {
+        "goto_definition"
+    }
+
+    fn schema(&self) -> ToolSchema {
+        ToolSchema {
+            name: self.name().to_string(),
+            description: "Find the definition location of a symbol (function, struct, etc.) across the repository".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "required": ["symbol_name"],
+                "properties": {
+                    "symbol_name": {
+                        "type": "string",
+                        "description": "Name of the symbol to find (e.g., 'list_dir', 'ContextChunk')"
+                    },
+                    "max_results": {
+                        "type": "number",
+                        "description": "Maximum number of results to return",
+                        "default": 5
+                    }
+                }
+            }),
+            output_schema: json!({
+                "type": "object",
+                "properties": {
+                    "definitions": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "path": {"type": "string"},
+                                "start_line": {"type": "number"},
+                                "end_line": {"type": "number"},
+                                "kind": {"type": "string"}
+                            }
+                        }
+                    }
+                }
+            }),
+        }
+    }
+
+    fn execute(&self, input: &ToolInput) -> ToolOutput {
+        let args = &input.args;
+
+        let symbol_name = match parse_string(args, "symbol_name") {
+            Ok(s) => s,
+            Err(e) => return ToolOutput::error(format!("{}", e)),
+        };
+
+        let max_results = parse_usize(args, "max_results").unwrap_or(5);
+
+        match find_symbol_definitions(&input.repo_root, &symbol_name, max_results) {
+            Ok(definitions) => {
+                if definitions.is_empty() {
+                    ToolOutput::success(json!({
+                        "definitions": [],
+                        "message": format!("No definitions found for '{}'", symbol_name)
+                    }))
+                    .with_trace(format!("no definitions found for '{}'", symbol_name))
+                } else {
+                    let defs_json: Vec<serde_json::Value> = definitions
+                        .iter()
+                        .map(|d| json!({
+                            "path": d.path,
+                            "start_line": d.start_line,
+                            "end_line": d.end_line,
+                            "kind": d.kind
+                        }))
+                        .collect();
+                    ToolOutput::success(json!({ "definitions": defs_json }))
+                        .with_trace(format!("found {} definitions for '{}'", definitions.len(), symbol_name))
+                }
+            }
+            Err(e) => ToolOutput::error(format!("search error: {}", e)),
+        }
+    }
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -469,5 +569,13 @@ mod tests {
         let tool = RunTerminalTool::new();
         let schema = tool.schema();
         assert_eq!(schema.name, "run_terminal");
+    }
+
+    #[test]
+    fn test_goto_definition_tool_schema() {
+        let tool = GotoDefinitionTool::new();
+        let schema = tool.schema();
+        assert_eq!(schema.name, "goto_definition");
+        assert!(schema.description.contains("definition"));
     }
 }

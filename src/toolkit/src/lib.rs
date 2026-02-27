@@ -14,7 +14,7 @@ mod tools;
 pub use registry::ToolRegistry;
 
 // Re-export common tool implementations
-pub use tools::{EditFileTool, ListDirTool, ReadFileTool, RunTerminalTool};
+pub use tools::{EditFileTool, GotoDefinitionTool, ListDirTool, ReadFileTool, RunTerminalTool};
 
 use core::code_chunk::{ContextChunk, IndexChunk};
 use serde::{Deserialize, Serialize};

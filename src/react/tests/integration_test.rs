@@ -261,3 +261,124 @@ fn test_summarize_state() {
     assert!(summary.contains("hits=0"));
     assert!(summary.contains("context_chunks=1"));
 }
+
+#[test]
+fn test_goto_definition_tool() {
+    use toolkit::{GotoDefinitionTool, ToolInput};
+
+    let temp_dir = setup_test_repo();
+
+    let tool = GotoDefinitionTool::new();
+    let input = ToolInput {
+        args: serde_json::json!({
+            "symbol_name": "greet",
+            "max_results": 5,
+        }),
+        repo_root: temp_dir.path().to_path_buf(),
+        policy: None,
+    };
+
+    let output = tool.execute(&input);
+
+    assert!(output.success);
+    let defs = output.data.get("definitions").and_then(|v| v.as_array());
+    assert!(defs.is_some());
+    // Should find the greet function in lib.rs
+    let defs = defs.unwrap();
+    assert!(!defs.is_empty());
+
+    let first_def = defs.first().unwrap();
+    let path = first_def.get("path").and_then(|v| v.as_str());
+    assert!(path.is_some());
+    assert!(path.unwrap().contains("lib.rs"));
+}
+
+#[test]
+fn test_enhanced_state_summary() {
+    use core::code_chunk::ContextChunk;
+    use react::state::summarize_state_enhanced;
+
+    let temp_dir = setup_test_repo();
+
+    let context = vec![ContextChunk {
+        path: "src/lib.rs".to_string(),
+        alias: 0,
+        snippet: "pub fn greet(name: &str) -> String {\n    format!(\"Hello, {}!\", name)\n}\n\npub fn add(a: i32, b: i32) -> i32 {\n    a + b\n}".to_string(),
+        start_line: 0,
+        end_line: 6,
+        reason: "test".to_string(),
+    }];
+
+    let hits = vec![];
+    let summary = summarize_state_enhanced(&hits, &context, temp_dir.path());
+
+    assert!(summary.contains("hits=0"));
+    assert!(summary.contains("context_chunks=1"));
+    // Enhanced summary includes symbol information
+    assert!(summary.contains("symbols=") || summary.contains("definitions:"));
+}
+
+#[test]
+fn test_symbol_resolution_in_refill() {
+    use core::code_chunk::{IndexChunkOptions, RefillOptions};
+    use tokenizers::Tokenizer;
+    use tools::{find_symbol_definitions, refill_hits, search_code_keyword, SearchCodeOptions};
+
+    let temp_dir = setup_test_repo();
+
+    // Try to load tokenizer, skip test if not available
+    let tokenizer = match Tokenizer::from_file("data/tokenizer.json") {
+        Ok(t) => t,
+        Err(_) => {
+            println!("Skipping test: tokenizer not found");
+            return;
+        }
+    };
+
+    // Search for "add" function
+    let result = search_code_keyword(
+        temp_dir.path(),
+        "add",
+        &tokenizer,
+        IndexChunkOptions::default(),
+        SearchCodeOptions {
+            max_files: 100,
+            max_hits: 10,
+            ..Default::default()
+        },
+    );
+
+    assert!(result.is_ok());
+    let (hits, _) = result.unwrap();
+
+    // Refill hits - this should also perform automatic symbol resolution
+    let result = refill_hits(temp_dir.path(), &hits, RefillOptions::default());
+    assert!(result.is_ok());
+
+    let (context, _) = result.unwrap();
+    // Should have context chunks
+    assert!(!context.is_empty());
+}
+
+#[test]
+fn test_find_symbol_definitions() {
+    use tools::find_symbol_definitions;
+
+    let temp_dir = setup_test_repo();
+
+    // Find definition of "greet" function
+    let result = find_symbol_definitions(temp_dir.path(), "greet", 5);
+
+    // Print error if failed for debugging
+    if let Err(ref e) = result {
+        println!("Error finding symbol definitions: {}", e);
+    }
+
+    assert!(result.is_ok(), "find_symbol_definitions failed: {:?}", result);
+    let defs = result.unwrap();
+    assert!(!defs.is_empty(), "No definitions found for 'greet'");
+
+    let def = &defs[0];
+    assert_eq!(def.path, "src/lib.rs");
+    assert_eq!(def.kind, "definition");
+}

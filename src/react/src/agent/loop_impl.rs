@@ -11,7 +11,7 @@ use crate::context::{render_prompt_context, ContextEngineOptions};
 use crate::planner::{
     expand_seed_terms, extract_first_json_object, plan_prompt, ReActAction, ReActStepTrace,
 };
-use crate::state::{merge_hits, summarize_state};
+use crate::state::{merge_hits, summarize_state_enhanced};
 use anyhow::Result;
 use core::code_chunk::{ContextChunk, IndexChunkOptions, RefillOptions};
 use serde::{Deserialize, Serialize};
@@ -131,7 +131,7 @@ impl ReactAgent {
                 return Ok((answer, pack, step_traces));
             }
 
-            let state = summarize_state(&hits, &context);
+            let state = summarize_state_enhanced(&hits, &context, repo_root);
             let (system, user) = plan_prompt(question, &state);
 
             let plan_raw = client.chat_system_user(&system, &user).unwrap_or_else(|e| {
