@@ -203,7 +203,7 @@ fn test_file_edit_operations() {
 #[test]
 fn test_merge_hits() {
     use core::code_chunk::IndexChunk;
-    use react::merge_hits;
+    use react::state::merge_hits;
 
     let base = vec![IndexChunk {
         path: "test.rs".to_string(),

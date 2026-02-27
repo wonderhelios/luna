@@ -11,7 +11,7 @@ use crate::context::{render_prompt_context, ContextEngineOptions};
 use crate::planner::{
     expand_seed_terms, extract_first_json_object, plan_prompt, ReActAction, ReActStepTrace,
 };
-use crate::{merge_hits, summarize_state};
+use crate::state::{merge_hits, summarize_state};
 use anyhow::Result;
 use core::code_chunk::{ContextChunk, IndexChunkOptions, RefillOptions};
 use serde::{Deserialize, Serialize};
