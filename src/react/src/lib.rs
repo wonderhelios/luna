@@ -18,8 +18,13 @@ pub mod agent;
 pub mod context;
 pub mod planner;
 pub mod state;
+pub mod util;
 
-pub use agent::{react_ask, ReactAgent, ReactOptions};
+pub use agent::{
+    run_fix_loop, react_ask, AgentLoop, ConvergedReason, FixAction, FixActionResult, FixIteration,
+    FixLoop, FixLoopConfig, FixLoopResult, LoopRunner, LoopRunnerConfig, NotConvergedReason,
+    ReactAgent, ReactOptions,
+};
 pub use context::{render_prompt_context, ContextEngineOptions};
 pub use planner::{ReActAction, ReActStepTrace};
 pub use state::{summarize_state, summarize_state_enhanced, SymbolInfo};

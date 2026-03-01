@@ -11,8 +11,8 @@ use crate::session::SessionStore;
 use crate::util::demo_tokenizer;
 
 pub fn run() -> Result<()> {
-    // 说明：这是 MCP-like 的最小 stdio JSON-RPC 服务。
-    // 未来接入正式 MCP 协议时，可以保留 method 语义与数据结构，只替换 framing/handshake。
+    // Note: This is a minimal MCP-like stdio JSON-RPC service.
+    // When integrating with the official MCP protocol in the future, method semantics and data structures can be preserved, only replacing framing/handshake.
 
     let tokenizer = demo_tokenizer();
     let llm_cfg = LLMConfig::from_env().unwrap_or_default();
@@ -32,7 +32,7 @@ pub fn run() -> Result<()> {
         let msg: serde_json::Value = match serde_json::from_str(line) {
             Ok(v) => v,
             Err(e) => {
-                // 无 id 的 parse error：按 JSON-RPC 约定，id=null
+                // Parse error without id: per JSON-RPC convention, id=null
                 let _ = write_error(
                     serde_json::Value::Null,
                     RpcErrorCode::ParseError.as_i64(),

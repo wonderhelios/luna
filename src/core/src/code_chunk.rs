@@ -50,8 +50,8 @@ impl Default for ChunkOptions {
     }
 }
 
-// IndexChunk 用于 检索 阶段：尺寸可控，便于向量检索、便于去重
-// Attention：不保证语义完整，因此在喂到 LLM 之前，通常需要经历 refill 变为 ContextChunk
+// IndexChunk is used for the retrieval phase: controllable size, suitable for vector search and deduplication
+// Attention: does not guarantee semantic completeness, so before feeding to LLM, it usually needs to go through refill to become ContextChunk
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct IndexChunk {
     pub path: String,
@@ -68,12 +68,12 @@ impl IndexChunk {
     }
 }
 
-// token 重叠策略
+// token overlap strategy
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum OverlapStrategy {
-    // 从窗口末尾回退 N 行
+    // Roll back N lines from the end of the window
     ByLines(usize),
-    // 0~1 之间的比例
+    // Ratio between 0~1
     Partial(f64),
 }
 
@@ -186,7 +186,7 @@ pub fn dedup_context_chunks(chunks: Vec<ContextChunk>) -> Vec<ContextChunk> {
 
 #[derive(Debug, Clone)]
 pub struct RefillOptions {
-    // 找不到 enclosing top-level scope时，围绕命中行做兜底窗口
+    // When enclosing top-level scope is not found, create a fallback window around the hit line
     pub fallback_window_lines: usize,
 }
 

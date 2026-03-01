@@ -8,6 +8,7 @@
 //! - `search`: Code search operations
 //! - `terminal`: Terminal command execution
 
+pub mod error_parse;
 pub mod fs;
 pub mod search;
 pub mod terminal;
@@ -16,6 +17,10 @@ pub mod terminal;
 pub use error::LunaError;
 
 // Re-export commonly used types
+pub use error_parse::{
+    parse_cargo_errors, parse_generic_errors, BuildErrorParser, CargoErrorParser,
+    DefaultErrorParser, ErrorKind, ErrorParserRegistry, ErrorRecord, ErrorSummary, Location,
+};
 pub use fs::{edit_file, list_dir, read_file, DirEntry, EditOp, EditResult};
 pub use search::{
     find_symbol_definitions, refill_hits, search_code_keyword, SearchCodeOptions, SymbolLocation,
@@ -81,9 +86,9 @@ pub fn detect_lang_id(path: &Path) -> Option<&'static str> {
 /// - camelCase identifiers (e.g., `contextChunks`, `myFunction`)
 /// - PascalCase identifiers (e.g., `ContextChunk`, `MyClass`)
 pub fn extract_code_identifiers(query: &str) -> Vec<String> {
-    // Regex 编译开销不低，这里用 Lazy 缓存编译结果，保证：
-    // - 只编译一次
-    // - 避免每次调用重复分配/编译
+    // Regex compilation overhead is non-trivial; use Lazy to cache compiled results, ensuring:
+    // - Only compile once
+    // - Avoid repeated allocation/compilation on each call
     static SNAKE_RE: Lazy<Regex> = Lazy::new(|| {
         Regex::new(r"[a-zA-Z_][a-zA-Z0-9_]{2,}").expect("internal regex must be valid")
     });

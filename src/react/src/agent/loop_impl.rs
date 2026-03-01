@@ -145,7 +145,7 @@ impl ReactAgent {
             // Safety check: if state shows code exists and user asks to fix, force answer
             let question_lower = question.to_lowercase();
             let asks_to_fix = question_lower.contains("fix")
-                || question_lower.contains("修复")
+                || question_lower.contains("fix")
                 || question_lower.contains("repair");
             let has_list_dir_visible = state.contains("visible_functions=[list_dir]");
             if asks_to_fix && has_list_dir_visible {

@@ -5,10 +5,10 @@ use std::io::{self, Write};
 use error::LunaError;
 use session::SessionError;
 
-/// JSON-RPC 2.0 标准错误码：
+/// JSON-RPC 2.0 standard error codes:
 /// -32700/-32600/-32601/-32602/-32603
 ///
-/// 服务器自定义错误码建议使用 -32099..-32000 区间。
+/// Server custom error codes should use the -32099..-32000 range.
 #[derive(Debug, Clone, Copy)]
 #[allow(dead_code)]
 #[repr(i64)]

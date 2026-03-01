@@ -693,8 +693,8 @@ mod tests {
     use tokenizers::{models::wordlevel::WordLevel, pre_tokenizers::whitespace::Whitespace};
 
     fn dummy_tokenizer() -> Tokenizer {
-        // 一个极简 tokenizer：WordLevel + Whitespace。
-        // 仅用于单元测试，让 encode/offsets 可用（未知词会落到 [UNK]）。
+        // A minimal tokenizer: WordLevel + Whitespace.
+        // Only used for unit tests to make encode/offsets work (unknown words fall back to [UNK]).
         let mut vocab = AHashMap::new();
         vocab.insert("[UNK]".to_string(), 0u32);
         vocab.insert("fn".to_string(), 1u32);
@@ -724,7 +724,7 @@ fn main() {
 
         let chunks =
             chunk_source("mem.rs", code.as_bytes(), "Rust", ChunkOptions::default()).unwrap();
-        // 至少切出 add/main 两个 scope（实现细节可能多一些 scope，这里只保证非空且包含关键字）
+        // Should produce at least add/main two scopes (implementation details may produce more scopes; here we only guarantee non-empty and keyword presence)
         assert!(!chunks.is_empty());
         let merged = chunks
             .iter()
@@ -755,7 +755,7 @@ fn main() {
             fallback_lines: 80,
         };
         let idx_chunks = index_chunks("", "mem.rs", code.as_bytes(), "Rust", &tok, opt);
-        // hybrid 策略下，IndexChunk 以语义边界（函数）为主，因此这里选择命中 add 函数体
+        // Under hybrid strategy, IndexChunk uses semantic boundaries (functions) as primary, so here we choose to hit the add function body
         let hit = idx_chunks
             .iter()
             .find(|c| c.text.contains("a + b") || c.text.contains("fn add"))

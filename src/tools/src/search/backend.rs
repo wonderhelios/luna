@@ -8,9 +8,9 @@ use tokenizers::Tokenizer;
 
 use super::options::SearchCodeOptions;
 
-/// 搜索后端抽象：用于把"占位关键词检索"与未来的"向量/混合检索"解耦。
+/// Search backend abstraction: decouples "placeholder keyword search" from future "vector/hybrid search".
 ///
-/// 约束：无论后端如何变化，都应产出统一的 `IndexChunk` 命中协议，供 Refill/ContextEngine 使用。
+/// Constraint: Regardless of backend changes, it should produce a unified `IndexChunk` hit protocol for Refill/ContextEngine to use.
 pub trait SearchBackend: Send + Sync {
     fn search(
         &self,
@@ -22,7 +22,7 @@ pub trait SearchBackend: Send + Sync {
     ) -> Result<(Vec<IndexChunk>, Vec<ToolTrace>)>;
 }
 
-/// 关键词占位检索后端：扫描仓库文件，匹配 query terms，并用 `IndexChunk` 规范化命中。
+/// Keyword placeholder search backend: scans repository files, matches query terms, and normalizes hits with `IndexChunk`.
 #[derive(Debug, Clone, Default)]
 pub struct KeywordSearchBackend;
 

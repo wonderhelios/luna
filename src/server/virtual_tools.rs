@@ -36,7 +36,7 @@ pub fn tool_output_like(
     trace: &str,
     error: Option<String>,
 ) -> serde_json::Value {
-    // 这里理论上不会失败；失败时退化到 json! 以保证服务可用。
+    // This theoretically should not fail; fallback to json! to ensure service availability on failure.
     let v = ToolOutputLike {
         success,
         data,

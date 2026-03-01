@@ -20,9 +20,9 @@ pub struct LLMConfig {
 impl Default for LLMConfig {
     fn default() -> Self {
         Self {
-            api_base: "https://open.bigmodel.cn/api/paas/v4/".to_string(),
+            api_base: "https://api.deepseek.com/v1/".to_string(),
             api_key: String::new(),
-            model: "glm-4-flash".to_string(),
+            model: "deepseek-chat".to_string(),
             temperature: 0.2,
             max_tokens: None,
             timeout_secs: 120,

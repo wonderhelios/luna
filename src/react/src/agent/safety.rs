@@ -1,30 +1,30 @@
-//! ReAct agent 安全状态与辅助方法
+//! ReAct agent safety state and helper methods
 //!
-//! 用于在 ReAct 循环中集中保存与“安全”相关的状态，例如：
-//! - 连续无增量搜索次数（用于判断是否该停止继续 search）
-//! - 最近一次搜索的 query（用于识别重复搜索）
-//! - 最近一次编辑的位置（文件 + 行范围，用于识别重复编辑）
+//! Used to centrally store "safety"-related state in the ReAct loop, such as:
+//! - Consecutive no-delta search count (used to determine if should stop continuing search)
+//! - Most recent search query (used to detect duplicate searches)
+//! - Most recent edit location (file + line range, used to detect duplicate edits)
 
 use serde::{Deserialize, Serialize};
 
-/// ReAct 循环中的安全相关状态
+/// Safety-related state in the ReAct loop
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct ReActSafetyState {
-    /// 连续无增量搜索次数
+    /// Consecutive no-delta search count
     pub no_delta_searches: usize,
-    /// 最近一次搜索的 query（用于检测重复搜索）
+    /// Most recent search query (used to detect duplicate searches)
     pub last_search_query: Option<String>,
-    /// 最近一次编辑的位置（path, start_line, end_line）
+    /// Most recent edit location (path, start_line, end_line)
     pub last_edit: Option<(String, usize, usize)>,
 }
 
 impl ReActSafetyState {
-    /// 是否应该基于当前安全状态“直接回答”（例如多次 search 无增量且已经有上下文）
+    /// Whether to "answer directly" based on current safety state (e.g., multiple searches with no delta and already has context)
     pub fn should_auto_answer(&self, has_context: bool) -> bool {
         self.no_delta_searches >= 2 && has_context
     }
 
-    /// 记录一次搜索，并返回：该搜索是否重复、是否无增量
+    /// Record a search and return: whether the search is duplicate, whether it has no delta
     pub fn record_search(&mut self, query: &str, had_delta: bool) -> (bool, bool) {
         let repeated = self
             .last_search_query
@@ -43,7 +43,7 @@ impl ReActSafetyState {
         (repeated, no_delta)
     }
 
-    /// 检测本次编辑是否与上一次编辑完全相同（同文件同范围）
+    /// Detect if this edit is exactly the same as the previous edit (same file, same range)
     pub fn is_duplicate_edit(&self, path: &str, start_line: usize, end_line: usize) -> bool {
         if let Some((last_path, last_start, last_end)) = &self.last_edit {
             last_path == path && *last_start == start_line && *last_end == end_line
@@ -52,7 +52,7 @@ impl ReActSafetyState {
         }
     }
 
-    /// 记录一次编辑位置
+    /// Record an edit location
     pub fn record_edit(&mut self, path: String, start_line: usize, end_line: usize) {
         self.last_edit = Some((path, start_line, end_line));
     }
@@ -66,13 +66,13 @@ mod tests {
     fn record_search_updates_counters_and_flags() {
         let mut s = ReActSafetyState::default();
 
-        // 第一次搜索，有增量：不计入 no_delta，repeated=false
+        // First search, with delta: not counted in no_delta, repeated=false
         let (repeated, no_delta) = s.record_search("foo", true);
         assert!(!repeated);
         assert!(!no_delta);
         assert_eq!(s.no_delta_searches, 0);
 
-        // 第二次同 query，无增量：repeated=true，no_delta=true，计入 no_delta_searches
+        // Second same query, no delta: repeated=true, no_delta=true, counted in no_delta_searches
         let (repeated2, no_delta2) = s.record_search("foo", false);
         assert!(repeated2);
         assert!(no_delta2);
@@ -83,11 +83,11 @@ mod tests {
     fn should_auto_answer_after_multiple_no_delta_searches() {
         let mut s = ReActSafetyState::default();
 
-        // 连续两次无增量搜索
+        // Two consecutive no-delta searches
         s.record_search("foo", false);
         s.record_search("foo", false);
 
-        // 有上下文时才会触发 auto answer
+        // Auto answer only triggers when there is context
         assert!(s.should_auto_answer(true));
         assert!(!s.should_auto_answer(false));
     }

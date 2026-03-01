@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 /// The LLM must output a JSON object with an "action" field:
 /// - Search: {"action":"search","query":"keywords"}
 /// - Edit: {"action":"edit_file","path":"...","start_line":N,"end_line":N,"new_content":"...","confirm":true}
-///   说明：start_line/end_line 为 0-based，且 end_line 为包含式。
+///   Note: start_line/end_line are 0-based, and end_line is inclusive.
 /// - Answer: {"action":"answer"}
 /// - Stop: {"action":"stop","reason":"..."}
 #[derive(Debug, Clone, Serialize, Deserialize)]

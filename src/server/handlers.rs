@@ -11,6 +11,7 @@ use crate::session::{PendingToolCall, SessionMetadata, SessionState, SessionStor
 use crate::util::{
     apply_policy_patch, parse_policy_overrides, repo_root_from_opt, session_id_from_params,
 };
+use crate::mcp;
 use crate::virtual_tools::{
     filter_schemas_by_policy, refill_tool_schema, search_tool_schema, tool_output_like,
 };
@@ -152,6 +153,18 @@ fn handle_tools_list(runtime: &LunaRuntime, sid: &str) -> Result<serde_json::Val
     // Server-side virtual tools (share the same tools/call channel)
     schemas.push(search_tool_schema());
     schemas.push(refill_tool_schema());
+
+    // Add MCP tools
+    let mcp_tools = mcp::list_tools();
+    for tool in mcp_tools {
+        schemas.push(toolkit::ToolSchema {
+            name: tool.name,
+            description: tool.description,
+            input_schema: tool.input_schema,
+            output_schema: serde_json::Value::Null,
+        });
+    }
+
     Ok(json!({
         "tools": schemas,
         "policy": runtime.policy(),
@@ -194,6 +207,13 @@ fn handle_tools_call(
             "ok",
             None,
         ));
+    }
+
+    // MCP tools
+    let mcp_tool_names: Vec<String> = mcp::list_tools().iter().map(|t| t.name.clone()).collect();
+    if mcp_tool_names.contains(&p.name) {
+        let response = mcp::dispatch_tool(&p.name, &p.arguments, runtime, &repo_root)?;
+        return Ok(serde_json::to_value(response)?);
     }
 
     let out = runtime.execute_tool(&p.name, repo_root.clone(), p.arguments.clone());

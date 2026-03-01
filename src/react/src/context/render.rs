@@ -1,4 +1,4 @@
-//! Context Engine: 渲染 Retrieved Context
+//! Context Engine: Render Retrieved Context
 
 use crate::ContextPack;
 use anyhow::Result;
@@ -8,14 +8,14 @@ use tokenizers::Tokenizer;
 
 use super::select::select_context_chunks;
 
-/// 上下文引擎配置
+/// Context engine configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContextEngineOptions {
-    /// 最多包含多少个 chunk
+    /// Maximum number of chunks to include
     pub max_chunks: usize,
-    /// token 上限（0 表示不限制）
+    /// Token limit (0 means unlimited)
     pub max_total_tokens: usize,
-    /// 在多少行之内自动合并 chunk
+    /// Auto-merge chunks within this many lines
     pub merge_gap_lines: usize,
 }
 
@@ -29,7 +29,7 @@ impl Default for ContextEngineOptions {
     }
 }
 
-/// 将 ContextPack 渲染为 LLM prompt 上下文文本
+/// Render ContextPack as LLM prompt context text
 pub fn render_prompt_context(
     repo_root: &Path,
     pack: &ContextPack,

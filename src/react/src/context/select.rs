@@ -1,4 +1,4 @@
-//! Context Engine: 命中合并与选择
+//! Context Engine: Hit Merging and Selection
 
 use anyhow::Result;
 use core::code_chunk::ContextChunk;
@@ -9,7 +9,7 @@ use tokenizers::Tokenizer;
 use super::render::ContextEngineOptions;
 use tools::fs::read_file_by_lines;
 
-/// 根据 hits 选择、合并、排序 ContextChunk
+/// Select, merge, and sort ContextChunks based on hits
 pub fn select_context_chunks(
     repo_root: &Path,
     hits: &[core::code_chunk::IndexChunk],
@@ -17,7 +17,7 @@ pub fn select_context_chunks(
     tokenizer: &Tokenizer,
     opt: ContextEngineOptions,
 ) -> Result<Vec<ContextChunk>> {
-    // 1) 先按 (path, start_line, end_line) 合并上下文
+    // 1) First merge contexts by (path, start_line, end_line)
     let mut by_path: BTreeMap<String, Vec<ContextChunk>> = BTreeMap::new();
     for c in context {
         by_path.entry(c.path.clone()).or_default().push(c.clone());
@@ -57,7 +57,7 @@ pub fn select_context_chunks(
         }
     }
 
-    // 2) 根据 hits 计算每个 ContextChunk 的 hit 数，作为排序依据
+    // 2) Calculate hit count for each ContextChunk as sorting criterion
     let mut scored = merged_all
         .into_iter()
         .map(|c| {
@@ -88,7 +88,7 @@ pub fn select_context_chunks(
         .take(opt.max_chunks.max(1))
         .collect::<Vec<_>>();
 
-    // 3) 按 token budget 进行裁剪
+    // 3) Trim according to token budget
     if opt.max_total_tokens > 0 {
         let mut total = 0usize;
         let mut keep = Vec::new();
@@ -103,7 +103,7 @@ pub fn select_context_chunks(
         selected = keep;
     }
 
-    // 4) 规范 alias，并按 path+start_line 稳定排序
+    // 4) Normalize aliases and stable sort by path+start_line
     selected.sort_by(|a, b| (a.path.as_str(), a.start_line).cmp(&(b.path.as_str(), b.start_line)));
     for (i, c) in selected.iter_mut().enumerate() {
         c.alias = i;

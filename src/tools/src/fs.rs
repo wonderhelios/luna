@@ -141,7 +141,7 @@ pub fn edit_file(path: &Path, op: &EditOp, create_backup: bool) -> Result<EditRe
             let end = *end_line;
             let lines: Vec<&str> = original.lines().collect();
 
-            if start >= lines.len() || end >= lines.len() || start > end {
+            if start > lines.len() || end > lines.len() || start > end {
                 return Ok(EditResult {
                     path: path_str,
                     success: false,
@@ -154,8 +154,8 @@ pub fn edit_file(path: &Path, op: &EditOp, create_backup: bool) -> Result<EditRe
             let replaced_lines = end - start + 1;
             let new_lines: Vec<&str> = new_content.lines().collect();
 
-            // Replace the line range
-            let mut new_lines_all = lines[..start].to_vec();
+            // Replace the line range (convert 1-indexed to 0-indexed)
+            let mut new_lines_all = lines[..start - 1].to_vec();
             new_lines_all.extend(new_lines);
             if end + 1 < lines.len() {
                 new_lines_all.extend(lines[end + 1..].to_vec());

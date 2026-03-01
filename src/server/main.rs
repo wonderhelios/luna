@@ -1,4 +1,5 @@
 mod handlers;
+mod mcp;
 mod rpc;
 mod server;
 mod session;
