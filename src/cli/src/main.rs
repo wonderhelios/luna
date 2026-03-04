@@ -1,10 +1,13 @@
-use runtime::LunaRuntime;
+use runtime::{LunaRuntime, RunRequest, SessionRef};
 
-fn main() {
+#[tokio::main]
+async fn main() {
     println!("🌙 Luna - AI Code Assistant");
     println!("Type 'exit' to quit\n");
 
-    let _runtime = LunaRuntime::new();
+    let runtime = LunaRuntime::new();
+    let _cwd = std::env::current_dir().ok();
+    let mut session_id: Option<String> = None;
 
     loop {
         print!("> ");
@@ -19,10 +22,32 @@ fn main() {
                 println!("Goodbye!");
                 break;
             }
+            "/help" => {
+                println!("Commands:\n  /help   Show this help\n  exit    Quit\n  quit    Quit\n");
+            }
             "" => continue,
             _ => {
-                println!("Received: {}", input);
-                println!("(Runtime not yet implemented)\n");
+                let session = match &session_id {
+                    Some(id) => SessionRef::Existing {
+                        session_id: id.clone(),
+                    },
+                    None => SessionRef::New { title: None },
+                };
+
+                let mut req = RunRequest::chat_turn(session, input);
+                if let Some(cwd) = req.cwd.clone() {
+                    req = req.with_cwd(cwd);
+                }
+
+                match runtime.run(req).await {
+                    Ok(resp) => {
+                        session_id = Some(resp.session_id);
+                        println!("{}\n", resp.output);
+                    }
+                    Err(err) => {
+                        eprintln!("Error: {err}\n");
+                    }
+                }
             }
         }
     }
