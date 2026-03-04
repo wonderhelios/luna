@@ -2,17 +2,19 @@
 resolver = "2"
 members = [
     "src/core",
-    "src/common",
     "src/error",
-    "src/session",
-    "src/intelligence",
-    "src/index",
     "src/llm",
+    "src/intelligence",
     "src/tools",
-    "src/toolkit",
-    "src/cache",
-    "src/config",
-    "src/react",
+    "src/session",
+    "src/runtime",
     "src/cli",
-    "src/server",
 ]
+
+[workspace.dependencies]
+serde = { version = "1.0", features = ["derive"] }
+tokio = { version = "1.0", features = ["full"] }
+tracing = "0.1"
+anyhow = "1.0"
+uuid = { version = "1.18", features = ["v4"] }
+parking_lot = "0.12"

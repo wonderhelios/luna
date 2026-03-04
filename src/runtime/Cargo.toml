@@ -1,13 +1,10 @@
 [package]
-name = "session"
+name = "runtime"
 version = "0.1.0"
 edition = "2021"
 
-[lib]
-path = "src/lib.rs"
-
 [dependencies]
 anyhow = { workspace = true }
-parking_lot = { workspace = true }
+tracing = { workspace = true }
+session = { path = "../session" }
 serde = { workspace = true }
-uuid = { workspace = true }

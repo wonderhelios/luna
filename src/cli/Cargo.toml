@@ -8,13 +8,5 @@ name = "luna"
 path = "src/main.rs"
 
 [dependencies]
-react = { path = "../react" }
-llm = { path = "../llm" }
-tools = { path = "../tools" }
-core = { path = "../core" }
-intelligence = { path = "../intelligence" }
-index = { path = "../index" }
-anyhow = "1.0"
-clap = { version = "4", features = ["derive"] }
-tokenizers = "0.21"
-ahash = "0.8"
+runtime = { path = "../runtime" }
+tokio = { workspace = true }
