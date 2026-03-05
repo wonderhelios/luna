@@ -639,7 +639,7 @@ fn scope_res_generic(
 mod tests {
     use super::*;
     use crate::SymbolId;
-    use core::text_range::{Point, TextRange};
+    use core::text_range::{Position, TextRange};
 
     use expect_test::expect;
 
@@ -650,12 +650,12 @@ mod tests {
     // assumes one byte per line
     fn r(start: usize, end: usize) -> TextRange {
         TextRange {
-            start: Point {
+            start: Position {
                 byte: start,
                 line: start,
                 column: 0,
             },
-            end: Point {
+            end: Position {
                 byte: end,
                 line: end,
                 column: 0,

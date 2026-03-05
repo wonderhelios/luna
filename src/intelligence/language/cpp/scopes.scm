@@ -133,26 +133,27 @@
 (for_range_loop
   declarator: (identifier) @local.definition.variable)
 
-;; structs
+;; structs - those with body are definitions
 (struct_specifier
   name: (type_identifier) @local.definition.struct
   body: (_))
 
-;; unions
+;; unions - those with body are definitions
 (union_specifier
   name: (type_identifier) @local.definition.union
   body: (_))
 
-;; enums
+;; enums - those with body are definitions
 (enum_specifier
   name: (type_identifier) @local.definition.enum
   body: (_))
 (enumerator
   name: (identifier) @local.definition.enumerator)
 
-;; classes
+;; classes - standard class definitions
+;; Use anchor to match the first type_identifier after the class keyword (supports macro modifiers like LEVELDB_EXPORT)
 (class_specifier
-  name: (type_identifier) @hoist.definition.class
+  (type_identifier) @hoist.definition.class
   body: (_))
 ;; class fields
 (field_declaration 
@@ -169,18 +170,29 @@
 (function_declarator
   (field_identifier) @hoist.definition.function)
 
+;; Workaround for tree-sitter-cpp limitation:
+;; class definitions with macro modifiers like `class LEVELDB_EXPORT Status`
+;; are parsed as function_definition with identifier as direct child.
+;; Capture these as class definitions.
+(function_definition
+  (class_specifier) @_class
+  (identifier) @hoist.definition.class)
+(function_definition
+  (struct_specifier) @_struct
+  (identifier) @local.definition.struct)
+
 ;; labels
 (labeled_statement
   (statement_identifier) @local.definition.label)
 
-;; using statements are declarations
+;; using a::b; - this is an import/using, not a real definition
 (using_declaration
-  (identifier) @local.definition)
+  (identifier) @local.import)
 
 ;; using a::b;
-(using_declaration 
-  (qualified_identifier 
-    name: (identifier) @local.definition))
+(using_declaration
+  (qualified_identifier
+    name: (identifier) @local.import))
 
 ;; using a = b;
 (alias_declaration

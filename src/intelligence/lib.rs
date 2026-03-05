@@ -1,10 +1,18 @@
+pub mod document;
 pub mod language;
 pub mod namespace;
+pub mod navigation;
+pub mod repo_scan;
 pub mod scope_resolution;
+pub mod snippet;
 
 pub use {
     language::{Language, MemoizedQuery, TSLanguage, TSLanguageConfig, ALL_LANGUAGES},
     namespace::*,
+    navigation::{
+        NavigationError, Navigator, SearchResult, SnippetOptions, SymbolContext, SymbolLocation,
+        TreeSitterNavigator,
+    },
     scope_resolution::{NodeKind, ScopeGraph},
 };
 
@@ -30,6 +38,27 @@ pub enum TreeSitterFileError {
     LanguageMismatch,
     QueryError(tree_sitter::QueryError),
     FileTooLarge,
+}
+
+impl std::fmt::Display for TreeSitterFileError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnsupportedLanguage => write!(f, "unsupported language"),
+            Self::ParseTimeout => write!(f, "parse timeout"),
+            Self::LanguageMismatch => write!(f, "language mismatch"),
+            Self::QueryError(_) => write!(f, "query error"),
+            Self::FileTooLarge => write!(f, "file too large"),
+        }
+    }
+}
+
+impl std::error::Error for TreeSitterFileError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::QueryError(err) => Some(err),
+            _ => None,
+        }
+    }
 }
 
 impl<'a> TreeSitterFile<'a> {

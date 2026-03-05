@@ -107,7 +107,7 @@ impl ScopeDebug {
                     .map(|edge| graph[edge.source()].range())
                     .collect::<Vec<_>>();
 
-                refs.sort();
+                refs.sort_by_key(|r| (r.start.byte, r.end.byte));
 
                 // symbol, if any
                 let symbol = match &graph[def_node] {
@@ -143,7 +143,7 @@ impl ScopeDebug {
                     .map(|edge| graph[edge.source()].range())
                     .collect::<Vec<_>>();
 
-                refs.sort();
+                refs.sort_by_key(|r| (r.start.byte, r.end.byte));
 
                 ImportDebug::new(range, text, refs, src)
             })
@@ -161,11 +161,11 @@ impl ScopeDebug {
             .collect::<Vec<_>>();
 
         // sort defs by their ranges
-        defs.sort_by(|a, b| a.range.cmp(&b.range));
+        defs.sort_by_key(|d| (d.range.start.byte, d.range.end.byte));
         // sort imports by their ranges
-        imports.sort_by(|a, b| a.range.cmp(&b.range));
+        imports.sort_by_key(|d| (d.range.start.byte, d.range.end.byte));
         // sort scopes by their ranges
-        scopes.sort_by(|a, b| a.range.cmp(&b.range));
+        scopes.sort_by_key(|d| (d.range.start.byte, d.range.end.byte));
 
         self.defs = defs;
         self.imports = imports;

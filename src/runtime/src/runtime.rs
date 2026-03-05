@@ -1,6 +1,8 @@
 use anyhow::Context;
 use session::Role;
 
+use std::path::Path;
+
 use crate::{
     config::RuntimeConfig,
     recorder::TrajectoryEvent,
@@ -40,13 +42,21 @@ impl LunaRuntime {
         req: RunRequest,
         session_id_for_end: &mut Option<String>,
     ) -> anyhow::Result<RunResponse> {
+        let RunRequest {
+            request_id,
+            session,
+            input: user_input,
+            cwd,
+            ..
+        } = req;
+
         let session_store = self.config.session_store();
         let trajectory = self.config.trajectory();
 
         let mut events = Vec::<RuntimeEvent>::new();
 
         // 1) load or create session
-        let mut session = match req.session {
+        let mut session = match session {
             SessionRef::New { title } => {
                 let session = session_store.create(title).context("create session")?;
                 trajectory.on_event(&session.id, TrajectoryEvent::SessionCreated);
@@ -71,7 +81,6 @@ impl LunaRuntime {
         *session_id_for_end = Some(session_id.clone());
 
         // 2) append user message
-        let user_input = req.input;
         session.push_message(Role::User, &user_input);
         trajectory.on_event(
             &session.id,
@@ -83,7 +92,7 @@ impl LunaRuntime {
         events.push(RuntimeEvent::UserMessageAppended);
 
         // 3) produce assistant output
-        let output = format!("received: {user_input}");
+        let output = self.produce_output(&user_input, cwd.as_deref(), &mut events)?;
 
         // 4) append assistant message
         session.push_message(Role::Assistant, &output);
@@ -100,11 +109,26 @@ impl LunaRuntime {
         session_store.save(session).context("save session")?;
 
         Ok(RunResponse {
-            request_id: req.request_id,
+            request_id,
             session_id,
             output,
             events,
         })
+    }
+
+    fn produce_output(
+        &self,
+        user_input: &str,
+        cwd: Option<&Path>,
+        events: &mut Vec<RuntimeEvent>,
+    ) -> anyhow::Result<String> {
+        // Phase-1: intelligence-first for symbol navigation queries.
+        let router = crate::router::RuntimeRouter::default();
+        if let Some(out) = router.maybe_handle(user_input, cwd, events)? {
+            return Ok(out);
+        }
+
+        Ok(format!("received: {user_input}"))
     }
 }
 

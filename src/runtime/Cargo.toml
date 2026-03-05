@@ -8,3 +8,4 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 session = { path = "../session" }
 serde = { workspace = true }
+intelligence = { path = "../intelligence" }
