@@ -6,7 +6,7 @@ async fn main() {
     println!("Type 'exit' to quit\n");
 
     let runtime = LunaRuntime::new();
-    let _cwd = std::env::current_dir().ok();
+    let cwd = std::env::current_dir().ok();
     let mut session_id: Option<String> = None;
 
     loop {
@@ -35,8 +35,8 @@ async fn main() {
                 };
 
                 let mut req = RunRequest::chat_turn(session, input);
-                if let Some(cwd) = req.cwd.clone() {
-                    req = req.with_cwd(cwd);
+                if let Some(cwd) = &cwd {
+                    req = req.with_cwd(cwd.clone());
                 }
 
                 match runtime.run(req).await {
