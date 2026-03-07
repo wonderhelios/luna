@@ -4,7 +4,11 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-pub type Result<T> = anyhow::Result<T>;
+mod jsonl_store;
+
+pub use jsonl_store::{JsonlSessionStore, LunaHome};
+
+pub type Result<T> = error::Result<T>;
 pub type TimestampMs = u64;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -61,6 +65,33 @@ pub trait SessionStore: Send + Sync {
     fn get(&self, id: &str) -> Result<Option<Session>>;
     fn create(&self, title: Option<String>) -> Result<Session>;
     fn save(&self, session: Session) -> Result<()>;
+
+    /// List known sessions.
+    ///
+    /// Default implementation returns a "not supported" error so existing stores
+    /// can remain minimal.
+    fn list(&self) -> Result<Vec<SessionSummary>> {
+        Err(error::LunaError::invalid_input(
+            "list() not supported by this SessionStore",
+        ))
+    }
+
+    /// Delete a session.
+    ///
+    /// Default implementation returns a "not supported" error.
+    fn delete(&self, _id: &str) -> Result<()> {
+        Err(error::LunaError::invalid_input(
+            "delete() not supported by this SessionStore",
+        ))
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SessionSummary {
+    pub id: String,
+    pub title: Option<String>,
+    pub message_count: usize,
+    pub updated_at: TimestampMs,
 }
 
 #[derive(Debug, Default)]
@@ -96,6 +127,21 @@ impl SessionStore for InMemorySessionStore {
 
         Ok(())
     }
+
+    fn list(&self) -> Result<Vec<SessionSummary>> {
+        let guard = self.inner.lock();
+        let mut out = guard
+            .values()
+            .map(|s| SessionSummary {
+                id: s.id.clone(),
+                title: s.title.clone(),
+                message_count: s.messages.len(),
+                updated_at: s.update_at,
+            })
+            .collect::<Vec<_>>();
+        out.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        Ok(out)
+    }
 }
 
 /// Generate a reasonably unique id
@@ -103,7 +149,7 @@ pub fn gen_id(prefix: &str) -> String {
     format!("{prefix}:{}", uuid::Uuid::new_v4())
 }
 
-fn now_ms() -> TimestampMs {
+pub(crate) fn now_ms() -> TimestampMs {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()

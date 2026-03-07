@@ -10,3 +10,8 @@ path = "src/main.rs"
 [dependencies]
 runtime = { path = "../runtime" }
 tokio = { workspace = true }
+ratatui = { workspace = true }
+crossterm = { workspace = true }
+futures-util = { workspace = true }
+unicode-width = { workspace = true }
+error = { path = "../error" }
