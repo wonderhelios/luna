@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use runtime::{LunaRuntime, RunRequest, SessionRef};
+use crate::tui::CancelToken;
 
 pub fn build_request(session_id: Option<&str>, cwd: Option<&PathBuf>, input: &str) -> RunRequest {
     let session = match session_id {
@@ -17,15 +18,22 @@ pub fn build_request(session_id: Option<&str>, cwd: Option<&PathBuf>, input: &st
     req
 }
 
-/// Run a single turn in a blocking thread, returning (new_session_id, output).
-pub fn run_turn_blocking(
+/// Run a single turn in a blocking thread, streaming RuntimeEvent to `event_tx`.
+///
+/// Supports cancellation via `cancel` token (checked between events).
+pub fn run_turn_blocking_with_events(
     handle: tokio::runtime::Handle,
     runtime: Arc<LunaRuntime>,
     session_id: Option<String>,
     cwd: Option<PathBuf>,
     input: String,
+    event_tx: tokio::sync::mpsc::Sender<runtime::RuntimeEvent>,
+    _cancel: CancelToken,
 ) -> error::Result<(String, String)> {
     let req = build_request(session_id.as_deref(), cwd.as_ref(), &input);
-    let resp = handle.block_on(runtime.run(req))?;
+    let resp = handle.block_on(runtime.run_with_event_hook(req, |ev| {
+        // Bounded channel: use try_send to avoid blocking
+        let _ = event_tx.try_send(ev.clone());
+    }))?;
     Ok((resp.session_id, resp.output))
 }

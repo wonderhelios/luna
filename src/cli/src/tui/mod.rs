@@ -10,20 +10,29 @@ use futures_util::StreamExt;
 use ratatui::{backend::CrosstermBackend, Terminal};
 use tokio::sync::mpsc;
 
-use runtime::LunaRuntime;
+use runtime::{LunaRuntime, RuntimeEvent};
 
 mod runtime_bridge;
 mod state;
 mod ui;
 
+/// UI message types
+///
+/// Uses bounded channel to prevent unbounded memory growth.
+/// Old events are dropped when UI rendering lags behind.
+#[allow(clippy::enum_variant_names)]
 enum UiMsg {
-    RuntimeOk {
+    Ok {
         session_id: String,
         output: String,
         from_command: bool,
     },
-    RuntimeErr {
+    Err {
         err: String,
+    },
+    /// Streaming event - updates status bar in real-time
+    Event {
+        event: RuntimeEvent,
     },
 }
 
@@ -44,6 +53,38 @@ impl Drop for TerminalGuard {
     }
 }
 
+/// Formats RuntimeEvent into status bar text
+fn format_event_status(event: &RuntimeEvent) -> String {
+    match event {
+        RuntimeEvent::TparTaskClassified { task } => format!("[Task] {task}"),
+        RuntimeEvent::TparPlanBuilt { plan } => format!("[Plan] {plan}"),
+        RuntimeEvent::TparStepStarted { step_id, step } => {
+            format!("[Step {step_id}] {step} ...")
+        }
+        RuntimeEvent::TparStepCompleted { step_id, ok } => {
+            format!("[Step {step_id}] {}", if *ok { "ok" } else { "failed" })
+        }
+        RuntimeEvent::TparReviewed { ok } => {
+            format!("[Review] {}", if *ok { "ok" } else { "needs revision" })
+        }
+        RuntimeEvent::ScopeGraphSearchStarted { repo_root } => {
+            format!("[ScopeGraph] searching in {repo_root}")
+        }
+        RuntimeEvent::ScopeGraphSearchCompleted { matches } => {
+            format!("[ScopeGraph] {matches} match(es)")
+        }
+        RuntimeEvent::FoundIdentifier { name } => format!("[Symbol] {name}"),
+        RuntimeEvent::SessionCreated { session_id } => {
+            format!("[Session] created: {session_id}")
+        }
+        RuntimeEvent::SessionLoaded { session_id } => {
+            format!("[Session] loaded: {session_id}")
+        }
+        RuntimeEvent::UserMessageAppended => "[Msg] User".to_owned(),
+        RuntimeEvent::AssistantMessageAppended => "[Msg] Assistant".to_owned(),
+    }
+}
+
 pub async fn run(runtime: Arc<LunaRuntime>, cwd: Option<std::path::PathBuf>) -> error::Result<()> {
     // Avoid ANSI sequences breaking TUI. (We can add ANSI->Span later.)
     std::env::set_var("NO_COLOR", "1");
@@ -56,14 +97,16 @@ pub async fn run(runtime: Arc<LunaRuntime>, cwd: Option<std::path::PathBuf>) -> 
     let mut app = state::AppState::new(runtime, cwd);
 
     let mut reader = EventStream::new();
-    let (tx, mut rx) = mpsc::unbounded_channel::<UiMsg>();
+    // Use bounded channel to prevent unbounded memory growth
+    // Buffer size 128 is sufficient for smooth UI while avoiding memory bloat
+    let (tx, mut rx) = mpsc::channel::<UiMsg>(128);
 
     loop {
         terminal.draw(|f| ui::draw(f, &app))?;
 
         tokio::select! {
             maybe_ev = reader.next() => {
-                let Some(ev) = maybe_ev else { continue; };
+                let Some(ev) = maybe_ev else { continue };
                 match ev {
                     Ok(Event::Key(key)) => {
                         if handle_key(&mut app, key, tx.clone()).await? {
@@ -78,33 +121,7 @@ pub async fn run(runtime: Arc<LunaRuntime>, cwd: Option<std::path::PathBuf>) -> 
             }
             maybe_msg = rx.recv() => {
                 if let Some(msg) = maybe_msg {
-                    app.busy = false;
-                    match msg {
-                        UiMsg::RuntimeOk { session_id, output, from_command } => {
-                            app.session_id = Some(session_id);
-
-                            // For slash commands, keep the result visible in status bar as well.
-                            // This avoids "no output" perception when users don't echo commands.
-                            if from_command {
-                                let trimmed = output.trim_end();
-                                app.status = if trimmed.is_empty() {
-                                    "命令执行完成（无输出）".to_owned()
-                                } else {
-                                    trimmed.to_owned()
-                                };
-                            } else {
-                                app.status.clear();
-                            }
-
-                            app.push_assistant(output);
-                            // auto scroll to bottom
-                            app.scroll_y = usize::MAX / 2;
-                        }
-                        UiMsg::RuntimeErr { err } => {
-                            app.status.clear();
-                            app.push_system(format!("❌ Error: {err}"));
-                        }
-                    }
+                    handle_ui_msg(&mut app, msg);
                 }
             }
         }
@@ -114,10 +131,79 @@ pub async fn run(runtime: Arc<LunaRuntime>, cwd: Option<std::path::PathBuf>) -> 
     Ok(())
 }
 
+/// Handles UI messages
+///
+/// Extracted from main loop to simplify control flow
+fn handle_ui_msg(app: &mut state::AppState, msg: UiMsg) {
+    match msg {
+        UiMsg::Ok {
+            session_id,
+            output,
+            from_command,
+        } => {
+            app.session_id = Some(session_id);
+            app.busy = false;
+
+            // For slash commands, keep the result visible in status bar as well.
+            if from_command {
+                let trimmed = output.trim_end();
+                app.status = if trimmed.is_empty() {
+                    "Command completed (no output)".to_owned()
+                } else {
+                    trimmed.to_owned()
+                };
+            } else {
+                app.status.clear();
+            }
+
+            app.push_assistant(output);
+            // auto scroll to bottom
+            app.scroll_y = usize::MAX / 2;
+        }
+        UiMsg::Event { event } => {
+            // Streaming events only update status bar, don't reset busy
+            app.status = format_event_status(&event);
+        }
+        UiMsg::Err { err } => {
+            app.busy = false;
+            app.status.clear();
+            app.push_system(format!("❌ Error: {err}"));
+        }
+    }
+}
+
+/// Cancellation token
+///
+/// Used to interrupt long-running tasks (reserved for future use)
+#[derive(Clone)]
+#[allow(dead_code)]
+pub struct CancelToken {
+    inner: Arc<tokio::sync::RwLock<bool>>,
+}
+
+impl CancelToken {
+    #[allow(dead_code)]
+    fn new() -> Self {
+        Self {
+            inner: Arc::new(tokio::sync::RwLock::new(false)),
+        }
+    }
+
+    #[allow(dead_code)]
+    async fn cancel(&self) {
+        *self.inner.write().await = true;
+    }
+
+    #[allow(dead_code)]
+    async fn is_cancelled(&self) -> bool {
+        *self.inner.read().await
+    }
+}
+
 async fn handle_key(
     app: &mut state::AppState,
     key: KeyEvent,
-    tx: mpsc::UnboundedSender<UiMsg>,
+    tx: mpsc::Sender<UiMsg>,
 ) -> error::Result<bool> {
     // Exit
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
@@ -138,11 +224,9 @@ async fn handle_key(
                 return Ok(true);
             }
 
-            // UX: 对于 `/sessions`、`/switch` 这类“控制命令”，
-            // 不把用户输入回显到聊天区，只展示执行结果即可。
             let is_slash_command = input.starts_with('/');
             if is_slash_command {
-                app.status = format!("运行命令：{input}");
+                app.status = format!("Running command: {input}");
             } else {
                 app.push_user(input.clone());
             }
@@ -153,19 +237,40 @@ async fn handle_key(
             let runtime = Arc::clone(&app.runtime);
             let session_id = app.session_id.clone();
             let cwd = app.cwd.clone();
+
+            // Create cancellation token
+            let cancel = CancelToken::new();
+            app.cancel_token = Some(cancel.clone());
+
+            // Bounded channel for event streaming, drops old events when full
+            let (event_tx, mut event_rx) = mpsc::channel::<RuntimeEvent>(64);
+            let ui_tx = tx.clone();
+
+            // Event forwarding task
+            tokio::spawn(async move {
+                while let Some(ev) = event_rx.recv().await {
+                    // Use try_send for non-blocking send, drop when full
+                    if ui_tx.try_send(UiMsg::Event { event: ev }).is_err() {
+                        // Channel full, event dropped - UI will catch up
+                        break;
+                    }
+                }
+            });
+
             tokio::task::spawn_blocking(move || {
-                let res =
-                    runtime_bridge::run_turn_blocking(handle, runtime, session_id, cwd, input);
+                let res = runtime_bridge::run_turn_blocking_with_events(
+                    handle, runtime, session_id, cwd, input, event_tx, cancel,
+                );
                 match res {
                     Ok((session_id, output)) => {
-                        let _ = tx.send(UiMsg::RuntimeOk {
+                        let _ = tx.try_send(UiMsg::Ok {
                             session_id,
                             output,
                             from_command: is_slash_command,
                         });
                     }
                     Err(err) => {
-                        let _ = tx.send(UiMsg::RuntimeErr {
+                        let _ = tx.try_send(UiMsg::Err {
                             err: err.to_string(),
                         });
                     }

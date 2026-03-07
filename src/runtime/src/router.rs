@@ -4,7 +4,10 @@ use error::{Result, ResultExt as _};
 
 use intelligence::{Navigator, SnippetOptions, TreeSitterNavigator};
 
-use crate::{intent, render, response::RuntimeEvent};
+use crate::{
+    intent, render,
+    response::{EventSink, RuntimeEvent},
+};
 
 /// Runtime router decides which subsystem should handle the user input.
 ///
@@ -18,7 +21,7 @@ impl RuntimeRouter {
         &self,
         user_input: &str,
         cwd: Option<&Path>,
-        events: &mut Vec<RuntimeEvent>,
+        events: &mut dyn EventSink,
     ) -> Result<Option<String>> {
         match intent::classify_intent(user_input) {
             intent::Intent::SymbolNavigation => {
@@ -43,7 +46,7 @@ impl SymbolNavigationRouter {
         &self,
         user_input: &str,
         cwd: Option<&Path>,
-        events: &mut Vec<RuntimeEvent>,
+        events: &mut dyn EventSink,
     ) -> Result<String> {
         self.handle_multi(user_input, cwd, events, render::RenderStyle::Navigation)
     }
@@ -52,7 +55,7 @@ impl SymbolNavigationRouter {
         &self,
         user_input: &str,
         cwd: Option<&Path>,
-        events: &mut Vec<RuntimeEvent>,
+        events: &mut dyn EventSink,
     ) -> Result<String> {
         self.handle_multi(user_input, cwd, events, render::RenderStyle::Explain)
     }
@@ -61,7 +64,7 @@ impl SymbolNavigationRouter {
         &self,
         user_input: &str,
         cwd: Option<&Path>,
-        events: &mut Vec<RuntimeEvent>,
+        events: &mut dyn EventSink,
         style: render::RenderStyle,
     ) -> Result<String> {
         // Position-based go-to-definition: <path>:<line>[:<col>]
@@ -92,10 +95,10 @@ impl SymbolNavigationRouter {
         let mut out = render::render_multi_header(&names);
 
         for (idx, name) in names.iter().enumerate() {
-            events.push(RuntimeEvent::FoundIdentifier {
+            events.emit(&RuntimeEvent::FoundIdentifier {
                 name: (*name).to_owned(),
             });
-            events.push(RuntimeEvent::ScopeGraphSearchStarted {
+            events.emit(&RuntimeEvent::ScopeGraphSearchStarted {
                 repo_root: repo_root.display().to_string(),
             });
 
@@ -108,7 +111,7 @@ impl SymbolNavigationRouter {
                     continue;
                 }
             };
-            events.push(RuntimeEvent::ScopeGraphSearchCompleted {
+            events.emit(&RuntimeEvent::ScopeGraphSearchCompleted {
                 matches: definitions.len(),
             });
 
@@ -180,7 +183,7 @@ impl SymbolNavigationRouter {
         line: usize,
         col: usize,
         cwd: Option<&Path>,
-        events: &mut Vec<RuntimeEvent>,
+        events: &mut dyn EventSink,
         style: render::RenderStyle,
     ) -> Result<String> {
         let Some(repo_root) = resolve_repo_root(cwd) else {
@@ -209,7 +212,7 @@ impl SymbolNavigationRouter {
             }
         };
 
-        events.push(RuntimeEvent::ScopeGraphSearchStarted {
+        events.emit(&RuntimeEvent::ScopeGraphSearchStarted {
             repo_root: repo_root.display().to_string(),
         });
 
@@ -228,7 +231,7 @@ impl SymbolNavigationRouter {
             }
         };
 
-        events.push(RuntimeEvent::ScopeGraphSearchCompleted {
+        events.emit(&RuntimeEvent::ScopeGraphSearchCompleted {
             matches: definitions.len(),
         });
 
@@ -261,7 +264,7 @@ impl SymbolNavigationRouter {
                 .any(|d| d.rel_path == r.rel_path && d.range == r.range)
         });
 
-        events.push(RuntimeEvent::FoundIdentifier { name: name.clone() });
+        events.emit(&RuntimeEvent::FoundIdentifier { name: name.clone() });
 
         let section = match style {
             render::RenderStyle::Navigation => render::render_symbol_navigation_success(

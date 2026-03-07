@@ -113,14 +113,14 @@ impl FsRepoFileProvider {
         let Some(name) = name else {
             return false;
         };
-        opt.exclude_dir_names.iter().any(|&d| d == name)
+        opt.exclude_dir_names.contains(&name)
     }
 
     fn should_include_file(path: &Path, opt: &RepoScanOptions) -> bool {
         let Some(ext) = path.extension().and_then(|s| s.to_str()) else {
             return false;
         };
-        opt.include_extensions.iter().any(|&e| e == ext)
+        opt.include_extensions.contains(&ext)
     }
 
     fn walk_dir(
