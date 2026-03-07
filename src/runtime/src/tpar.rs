@@ -11,7 +11,7 @@ use error::ResultExt as _;
 
 use crate::config::TokenBudget;
 use crate::recorder::{TrajectoryRecorder, TrajectoryStep};
-use crate::response::RuntimeEvent;
+use crate::response::{EventSink, RuntimeEvent};
 use crate::{intent, render, safety};
 
 #[derive(Clone)]
@@ -121,29 +121,29 @@ pub enum ReviewResult {
 pub fn run_turn(
     user_input: &str,
     ctx: TurnContext,
-    events: &mut Vec<RuntimeEvent>,
+    events: &mut dyn EventSink,
 ) -> error::Result<String> {
     if user_input.chars().count() > ctx.budget.max_input_chars {
         let msg = format!(
-            "❌ 输入过长：超过 max_input_chars={}，请缩短问题或拆分步骤。",
+            "❌ Input too long: exceeds max_input_chars={}. Please shorten or split your request.",
             ctx.budget.max_input_chars
         );
-        events.push(RuntimeEvent::TparTaskClassified {
+        events.emit(&RuntimeEvent::TparTaskClassified {
             task: "rejected".to_owned(),
         });
-        events.push(RuntimeEvent::TparReviewed { ok: false });
+        events.emit(&RuntimeEvent::TparReviewed { ok: false });
         return Ok(msg);
     }
 
     // Task
     let task = TaskAnalyzer::analyze(user_input);
-    events.push(RuntimeEvent::TparTaskClassified {
+    events.emit(&RuntimeEvent::TparTaskClassified {
         task: task.name().to_owned(),
     });
 
     // Plan
     let plan = RuleBasedPlanner::plan(&task, ctx.budget.max_steps)?;
-    events.push(RuntimeEvent::TparPlanBuilt {
+    events.emit(&RuntimeEvent::TparPlanBuilt {
         plan: format!("steps={}", plan.steps.len()),
     });
 
@@ -161,7 +161,7 @@ pub fn run_turn(
 
     // Review/Reflect
     let ok = matches!(review, ReviewResult::Success);
-    events.push(RuntimeEvent::TparReviewed { ok });
+    events.emit(&RuntimeEvent::TparReviewed { ok });
 
     Ok(out)
 }
@@ -379,7 +379,7 @@ impl ActExecutor {
         &mut self,
         plan: &Plan,
         task: &Task,
-        events: &mut Vec<RuntimeEvent>,
+        events: &mut dyn EventSink,
     ) -> error::Result<(String, ReviewResult)> {
         let repo_root = crate::router::resolve_repo_root(self.cwd.as_deref());
         let tool_ctx = tools::ToolContext {
@@ -392,7 +392,7 @@ impl ActExecutor {
 
         for (i, step) in plan.steps.iter().enumerate() {
             let step_id = i + 1;
-            events.push(RuntimeEvent::TparStepStarted {
+            events.emit(&RuntimeEvent::TparStepStarted {
                 step_id,
                 step: step.label(),
             });
@@ -414,7 +414,7 @@ impl ActExecutor {
                 }
             };
 
-            events.push(RuntimeEvent::TparStepCompleted { step_id, ok });
+            events.emit(&RuntimeEvent::TparStepCompleted { step_id, ok });
             self.trajectory.on_step(&TrajectoryStep {
                 ts_ms: now_micros(),
                 session_id: self.session_id.clone(),
@@ -469,7 +469,7 @@ impl ActExecutor {
         task: &Task,
         tool_ctx: &tools::ToolContext,
         repo_root: Option<&Path>,
-        events: &mut Vec<RuntimeEvent>,
+        events: &mut dyn EventSink,
     ) -> error::Result<StepOutcome> {
         match step {
             PlanStep::Echo { text } => Ok(StepOutcome {

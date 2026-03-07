@@ -278,8 +278,8 @@ impl<P: RepoFileProvider> TreeSitterNavigator<P> {
                 };
                 let next = bytes.get(end_byte).copied();
 
-                let prev_ok = prev.map_or(true, |c| !is_ident_continue(c));
-                let next_ok = next.map_or(true, |c| !is_ident_continue(c));
+                let prev_ok = prev.is_none_or(|c| !is_ident_continue(c));
+                let next_ok = next.is_none_or(|c| !is_ident_continue(c));
 
                 if prev_ok && next_ok {
                     out.push(TextRange {
@@ -311,9 +311,9 @@ impl<P: RepoFileProvider> TreeSitterNavigator<P> {
 
 fn is_ident_continue(b: u8) -> bool {
     b == b'_'
-        || (b'a'..=b'z').contains(&b)
-        || (b'A'..=b'Z').contains(&b)
-        || (b'0'..=b'9').contains(&b)
+        || b.is_ascii_lowercase()
+        || b.is_ascii_uppercase()
+        || b.is_ascii_digit()
 }
 
 fn is_function_like_line(line: &str) -> bool {
@@ -459,7 +459,7 @@ impl<P: RepoFileProvider> Navigator for TreeSitterNavigator<P> {
                         .take(d.range.start.byte)
                         .enumerate()
                         .filter(|(_, &b)| b == b'\n')
-                        .last()
+                        .next_back()
                         .map(|(i, _)| i + 1)
                         .unwrap_or(0);
                     // Find the end of this line

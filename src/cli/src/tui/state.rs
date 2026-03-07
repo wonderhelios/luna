@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use runtime::LunaRuntime;
+use crate::tui::CancelToken;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChatRole {
@@ -28,6 +29,9 @@ pub struct AppState {
     pub scroll_y: usize,
     pub busy: bool,
     pub status: String,
+
+    /// Cancellation token for the current turn
+    pub cancel_token: Option<CancelToken>,
 }
 
 impl AppState {
@@ -38,7 +42,7 @@ impl AppState {
             session_id: None,
             messages: vec![ChatMessage {
                 role: ChatRole::System,
-                content: "🌙 Luna - AI Code Assistant\nCtrl+C 退出 | Enter 发送 | PgUp/PgDn 滚动"
+                content: "🌙 Luna - AI Code Assistant\nCtrl+C Exit | Enter Send | PgUp/PgDn Scroll"
                     .to_owned(),
             }],
             input: String::new(),
@@ -46,6 +50,7 @@ impl AppState {
             scroll_y: 0,
             busy: false,
             status: String::new(),
+            cancel_token: None,
         }
     }
 

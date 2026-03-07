@@ -80,7 +80,7 @@ fn render_symbol_result(
                     if !doc.is_empty() {
                         out.push_str("Documentation comments (excerpt):\n");
                         out.push_str(&doc);
-                        out.push_str("\n");
+                        out.push('\n');
                     }
                 }
             }
@@ -95,7 +95,7 @@ fn render_symbol_result(
 
             out.push_str("\nCode snippet:\n");
             out.push_str(&snippet);
-            out.push_str("\n");
+            out.push('\n');
         }
         Err(err) => {
             out.push_str(&format!("⚠️ Failed to get context: {err}\n"));
@@ -343,7 +343,7 @@ pub fn render_multi_header(found: &[&str]) -> String {
     if !found.is_empty() {
         out.push_str("[Searching with ScopeGraph...]\n\n");
     } else {
-        out.push_str("\n");
+        out.push('\n');
     }
     out
 }

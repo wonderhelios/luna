@@ -48,6 +48,25 @@ pub enum RuntimeEvent {
     },
 }
 
+/// A sink for runtime events
+pub trait EventSink {
+    fn emit(&mut self, event: &RuntimeEvent);
+
+    /// Some sinks are streaming-only and may not keep an in-memory buffer
+    fn snapshot(&self) -> Option<&[RuntimeEvent]> {
+        None
+    }
+}
+
+impl EventSink for Vec<RuntimeEvent> {
+    fn emit(&mut self, event: &RuntimeEvent) {
+        self.push(event.clone());
+    }
+    fn snapshot(&self) -> Option<&[RuntimeEvent]> {
+        Some(self.as_slice())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunResponse {
     pub request_id: String,

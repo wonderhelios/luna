@@ -35,7 +35,7 @@ pub fn draw(frame: &mut Frame, app: &AppState) {
     let (input_view, cursor_x) =
         input_view_and_cursor(&app.input, app.input_cursor, chunks[1].width);
     let input =
-        Paragraph::new(input_view).block(Block::default().borders(Borders::ALL).title("输入"));
+        Paragraph::new(input_view).block(Block::default().borders(Borders::ALL).title("Input"));
     frame.render_widget(input, chunks[1]);
     // Place cursor inside the input box.
     let x = chunks[1].x + 1 + cursor_x;
@@ -44,7 +44,7 @@ pub fn draw(frame: &mut Frame, app: &AppState) {
 
     // Status bar
     let status = if app.status.is_empty() {
-        "Ctrl+C 退出 | Enter 发送 | PgUp/PgDn 滚动".to_owned()
+        "Ctrl+C Exit | Enter Send | PgUp/PgDn Scroll".to_owned()
     } else {
         app.status.clone()
     };

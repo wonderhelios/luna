@@ -63,7 +63,7 @@ pub fn is_explain_symbol_query(input: &str) -> bool {
 /// Extract identifiers from free-form user input.
 ///
 /// This targets ASCII identifiers only: `[A-Za-z_][A-Za-z0-9_]*`.
-pub fn extract_identifiers<'a>(input: &'a str) -> Vec<&'a str> {
+pub fn extract_identifiers(input: &str) -> Vec<&str> {
     let bytes = input.as_bytes();
     let mut out = Vec::new();
     let mut i = 0;
@@ -104,7 +104,7 @@ pub fn extract_identifiers_dedup<'a>(input: &'a str) -> Vec<&'a str> {
 
 /// Heuristic: prefer snake_case tokens (often functions), otherwise the longest token.
 #[must_use]
-pub fn extract_best_identifier<'a>(input: &'a str) -> Option<&'a str> {
+pub fn extract_best_identifier(input: &str) -> Option<&str> {
     let tokens = extract_identifiers(input);
     if let Some(t) = tokens.iter().copied().find(|t| t.contains('_')) {
         return Some(t);
@@ -160,9 +160,9 @@ fn parse_file_position_token(token: &str) -> Option<(std::path::PathBuf, usize, 
 }
 
 fn is_ident_start(b: u8) -> bool {
-    b == b'_' || (b'a'..=b'z').contains(&b) || (b'A'..=b'Z').contains(&b)
+    b == b'_' || b.is_ascii_lowercase() || b.is_ascii_uppercase()
 }
 
 fn is_ident_continue(b: u8) -> bool {
-    is_ident_start(b) || (b'0'..=b'9').contains(&b)
+    is_ident_start(b) || b.is_ascii_digit()
 }
