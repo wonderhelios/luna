@@ -1,6 +1,7 @@
 use intelligence::{SymbolContext, SymbolLocation};
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RenderStyle {
     /// Navigation-style output (Phase-1 MVP default).
     Navigation,
@@ -12,7 +13,7 @@ pub enum RenderStyle {
 pub fn render_symbol_navigation_success(
     name: &str,
     primary: &SymbolLocation,
-    context: Result<SymbolContext, anyhow::Error>,
+    context: Result<SymbolContext, error::LunaError>,
     other_candidates: &[SymbolLocation],
     references: &[SymbolLocation],
 ) -> String {
@@ -29,7 +30,7 @@ pub fn render_symbol_navigation_success(
 pub fn render_symbol_explain_success(
     name: &str,
     primary: &SymbolLocation,
-    context: Result<SymbolContext, anyhow::Error>,
+    context: Result<SymbolContext, error::LunaError>,
     other_candidates: &[SymbolLocation],
     references: &[SymbolLocation],
 ) -> String {
@@ -47,7 +48,7 @@ fn render_symbol_result(
     style: RenderStyle,
     name: &str,
     primary: &SymbolLocation,
-    context: Result<SymbolContext, anyhow::Error>,
+    context: Result<SymbolContext, error::LunaError>,
     other_candidates: &[SymbolLocation],
     references: &[SymbolLocation],
 ) -> String {
@@ -348,7 +349,8 @@ pub fn render_multi_header(found: &[&str]) -> String {
 }
 
 pub fn render_symbol_navigation_missing_identifier() -> String {
-    "❌ No identifier detected.\n\nPlease ask in a format like: `Where is LunaRuntime defined?`".to_owned()
+    "❌ No identifier detected.\n\nPlease ask in a format like: `Where is LunaRuntime defined?`"
+        .to_owned()
 }
 
 pub fn render_symbol_navigation_missing_repo_root(name: &str) -> String {
@@ -356,7 +358,7 @@ pub fn render_symbol_navigation_missing_repo_root(name: &str) -> String {
     "⚠️ Unable to resolve repo_root: needs to be run in a git repository directory (cwd should trace back to `.git`).".to_owned()
 }
 
-pub fn render_symbol_navigation_search_failed(name: &str, err: &anyhow::Error) -> String {
+pub fn render_symbol_navigation_search_failed(name: &str, err: &error::LunaError) -> String {
     let _ = name;
     format!("❌ Search failed: {err}")
 }

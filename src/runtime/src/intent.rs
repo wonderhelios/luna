@@ -1,7 +1,9 @@
+use serde::{Deserialize, Serialize};
+
 /// Intent classification and entity extraction.
 ///
 /// Phase-1 implementation is rule-based and intentionally conservative.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Intent {
     /// User is asking for symbol navigation (where is it defined, go-to-definition, etc.).
     SymbolNavigation,

@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use anyhow::Context;
+use error::{Result, ResultExt as _};
 
 use intelligence::{Navigator, SnippetOptions, TreeSitterNavigator};
 
@@ -8,9 +8,6 @@ use crate::{intent, render, response::RuntimeEvent};
 
 /// Runtime router decides which subsystem should handle the user input.
 ///
-/// Phase-1:
-/// - intelligence-first for symbol navigation queries
-/// - otherwise fallback to simple echo
 #[derive(Debug, Default)]
 pub struct RuntimeRouter {
     symbol_nav: SymbolNavigationRouter,
@@ -22,7 +19,7 @@ impl RuntimeRouter {
         user_input: &str,
         cwd: Option<&Path>,
         events: &mut Vec<RuntimeEvent>,
-    ) -> anyhow::Result<Option<String>> {
+    ) -> Result<Option<String>> {
         match intent::classify_intent(user_input) {
             intent::Intent::SymbolNavigation => {
                 Ok(Some(self.symbol_nav.handle(user_input, cwd, events)?))
@@ -35,19 +32,10 @@ impl RuntimeRouter {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct SymbolNavigationRouter {
     navigator: TreeSitterNavigator<intelligence::repo_scan::FsRepoFileProvider>,
     snippet_opt: SnippetOptions,
-}
-
-impl Default for SymbolNavigationRouter {
-    fn default() -> Self {
-        Self {
-            navigator: TreeSitterNavigator::default(),
-            snippet_opt: SnippetOptions::default(),
-        }
-    }
 }
 
 impl SymbolNavigationRouter {
@@ -56,7 +44,7 @@ impl SymbolNavigationRouter {
         user_input: &str,
         cwd: Option<&Path>,
         events: &mut Vec<RuntimeEvent>,
-    ) -> anyhow::Result<String> {
+    ) -> Result<String> {
         self.handle_multi(user_input, cwd, events, render::RenderStyle::Navigation)
     }
 
@@ -65,7 +53,7 @@ impl SymbolNavigationRouter {
         user_input: &str,
         cwd: Option<&Path>,
         events: &mut Vec<RuntimeEvent>,
-    ) -> anyhow::Result<String> {
+    ) -> Result<String> {
         self.handle_multi(user_input, cwd, events, render::RenderStyle::Explain)
     }
 
@@ -75,7 +63,7 @@ impl SymbolNavigationRouter {
         cwd: Option<&Path>,
         events: &mut Vec<RuntimeEvent>,
         style: render::RenderStyle,
-    ) -> anyhow::Result<String> {
+    ) -> Result<String> {
         // Position-based go-to-definition: <path>:<line>[:<col>]
         if let Some((path, line, col)) = intent::extract_file_position(user_input) {
             return self.handle_position(path, line, col, cwd, events, style);
@@ -114,9 +102,9 @@ impl SymbolNavigationRouter {
             let definitions = match self.navigator.goto_definition(&repo_root, name) {
                 Ok(v) => v,
                 Err(err) => {
-                    let err = anyhow::Error::new(err);
+                    let err = error::LunaError::invalid_input(err.to_string());
                     out.push_str(&render::render_symbol_navigation_search_failed(name, &err));
-                    out.push_str("\n");
+                    out.push('\n');
                     continue;
                 }
             };
@@ -126,7 +114,7 @@ impl SymbolNavigationRouter {
 
             if definitions.is_empty() {
                 out.push_str(&render::render_symbol_navigation_not_found(name));
-                out.push_str("\n");
+                out.push('\n');
                 continue;
             }
 
@@ -134,14 +122,14 @@ impl SymbolNavigationRouter {
             let ctx = self
                 .navigator
                 .get_symbol_context(&repo_root, primary, &self.snippet_opt)
+                .map_err(|e| error::LunaError::invalid_input(e.to_string()))
                 .with_context(|| {
                     format!(
                         "get symbol context for {}:{}",
                         primary.rel_path.display(),
                         primary.range.start.line + 1
                     )
-                })
-                .map_err(anyhow::Error::from);
+                });
 
             let other_candidates = definitions.get(1..).unwrap_or_default();
 
@@ -179,7 +167,7 @@ impl SymbolNavigationRouter {
 
             out.push_str(&section);
             if idx + 1 < names.len() {
-                out.push_str("\n");
+                out.push('\n');
             }
         }
 
@@ -194,7 +182,7 @@ impl SymbolNavigationRouter {
         cwd: Option<&Path>,
         events: &mut Vec<RuntimeEvent>,
         style: render::RenderStyle,
-    ) -> anyhow::Result<String> {
+    ) -> Result<String> {
         let Some(repo_root) = resolve_repo_root(cwd) else {
             let header = render::render_multi_header(&["<position>"]);
             return Ok(format!(
@@ -231,7 +219,7 @@ impl SymbolNavigationRouter {
         {
             Ok(v) => v,
             Err(err) => {
-                let err = anyhow::Error::new(err);
+                let err = error::LunaError::invalid_input(err.to_string());
                 let header = render::render_multi_header(&["<position>"]);
                 return Ok(format!(
                     "{header}{}",
@@ -255,7 +243,7 @@ impl SymbolNavigationRouter {
         let ctx = self
             .navigator
             .get_symbol_context(&repo_root, primary, &self.snippet_opt)
-            .map_err(anyhow::Error::from);
+            .map_err(|e| error::LunaError::invalid_input(e.to_string()));
 
         let name = std::fs::read_to_string(repo_root.join(&rel_path))
             .ok()
@@ -327,13 +315,10 @@ fn identifier_at_position(content: &str, line: usize, column: usize) -> Option<S
 }
 
 fn is_ident_continue(b: u8) -> bool {
-    b == b'_'
-        || (b'a'..=b'z').contains(&b)
-        || (b'A'..=b'Z').contains(&b)
-        || (b'0'..=b'9').contains(&b)
+    b == b'_' || b.is_ascii_alphanumeric()
 }
 
-fn resolve_repo_root(cwd: Option<&Path>) -> Option<PathBuf> {
+pub(crate) fn resolve_repo_root(cwd: Option<&Path>) -> Option<PathBuf> {
     let mut cur = cwd?;
     if cur.is_file() {
         cur = cur.parent()?;

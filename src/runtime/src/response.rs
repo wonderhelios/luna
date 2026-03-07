@@ -11,6 +11,29 @@ pub enum RuntimeEvent {
     UserMessageAppended,
     AssistantMessageAppended,
 
+    /// TPAR: task classification completed for this turn
+    TparTaskClassified {
+        task: String,
+    },
+    /// TPAR: plan built for this trun
+    TparPlanBuilt {
+        plan: String,
+    },
+    /// TPAR: step start
+    TparStepStarted {
+        step_id: usize,
+        step: String,
+    },
+    /// TPAR: step completed
+    TparStepCompleted {
+        step_id: usize,
+        ok: bool,
+    },
+    /// TPAR: review/reflect phase completed
+    TparReviewed {
+        ok: bool,
+    },
+
     /// Runtime detected a symbol query in the user input.
     FoundIdentifier {
         name: String,
