@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 /// Text position
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Default)]
 pub struct Position {
     /// Byte offset
     pub byte: usize,
@@ -19,15 +20,6 @@ impl Position {
     }
 }
 
-impl Default for Position {
-    fn default() -> Self {
-        Self {
-            byte: 0,
-            line: 0,
-            column: 0,
-        }
-    }
-}
 
 /// Text range
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]

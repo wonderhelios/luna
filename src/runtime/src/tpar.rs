@@ -7,9 +7,10 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use error::ResultExt as _;
+use error::{LunaError, ResultExt as _};
 
 use crate::config::TokenBudget;
+use crate::planner::{PlannerContext, TaskPlanner};
 use crate::recorder::{TrajectoryRecorder, TrajectoryStep};
 use crate::response::{EventSink, RuntimeEvent};
 use crate::{intent, render, safety};
@@ -23,6 +24,7 @@ pub struct TurnContext {
     pub trajectory: Arc<dyn TrajectoryRecorder>,
     pub tools: Arc<tools::ToolRegistry>,
     pub budget: TokenBudget,
+    pub planner: Arc<dyn TaskPlanner>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -82,9 +84,15 @@ pub enum PlanStep {
     ToolCall {
         call: tools::ToolCall,
     },
+    Think {
+        text: String,
+    },
     Intelligence {
         style: render::RenderStyle,
         query: String,
+    },
+    Verify {
+        cmd: String,
     },
     Echo {
         text: String,
@@ -95,10 +103,12 @@ impl PlanStep {
     fn label(&self) -> String {
         match self {
             PlanStep::ToolCall { call } => format!("tool:{}", call.name),
+            PlanStep::Think { .. } => "think".to_owned(),
             PlanStep::Intelligence { style, .. } => match style {
                 render::RenderStyle::Navigation => "intelligence:navigation".to_owned(),
                 render::RenderStyle::Explain => "intelligence:explain".to_owned(),
             },
+            PlanStep::Verify { .. } => "verify".to_owned(),
             PlanStep::Echo { .. } => "echo".to_owned(),
         }
     }
@@ -142,7 +152,13 @@ pub fn run_turn(
     });
 
     // Plan
-    let plan = RuleBasedPlanner::plan(&task, ctx.budget.max_steps)?;
+    let plan = ctx.planner.plan(
+        &task,
+        &PlannerContext {
+            budget: ctx.budget.clone(),
+        },
+        events,
+    )?;
     events.emit(&RuntimeEvent::TparPlanBuilt {
         plan: format!("steps={}", plan.steps.len()),
     });
@@ -247,100 +263,6 @@ impl TaskAnalyzer {
     }
 }
 
-struct RuleBasedPlanner;
-
-impl RuleBasedPlanner {
-    fn plan(task: &Task, max_steps: usize) -> error::Result<Plan> {
-        let mut steps = Vec::<PlanStep>::new();
-
-        match task.task_type {
-            TaskType::Query => {
-                steps.push(PlanStep::Intelligence {
-                    style: render::RenderStyle::Navigation,
-                    query: task.raw_input.clone(),
-                });
-            }
-            TaskType::Explain => {
-                steps.push(PlanStep::Intelligence {
-                    style: render::RenderStyle::Explain,
-                    query: task.raw_input.clone(),
-                });
-            }
-            TaskType::Edit => {
-                let path = task
-                    .entities
-                    .iter()
-                    .find(|e| e.kind == CodeEntityKind::Path)
-                    .map(|e| e.value.clone())
-                    .unwrap_or_default();
-                steps.push(PlanStep::ToolCall {
-                    call: tools::ToolCall {
-                        name: "read_file".to_owned(),
-                        args: serde_json::json!({ "path": path }),
-                    },
-                });
-
-                // If we have explicit replacement, plan a real edit.
-                if let Some((line_1, new_line)) = extract_edit_payload(task) {
-                    steps.push(PlanStep::ToolCall {
-                        call: tools::ToolCall {
-                            name: "edit_file".to_owned(),
-                            args: serde_json::json!({ "path": path, "line_1": line_1, "new_line": new_line }),
-                        },
-                    });
-                    steps.push(PlanStep::ToolCall {
-                        call: tools::ToolCall {
-                            name: "read_file".to_owned(),
-                            args: serde_json::json!({ "path": path }),
-                        },
-                    });
-                } else {
-                    // Still produce an edit step, but it will fail fast with a clear error.
-                    steps.push(PlanStep::ToolCall {
-                        call: tools::ToolCall {
-                            name: "edit_file".to_owned(),
-                            args: serde_json::json!({ "path": path }),
-                        },
-                    });
-                }
-            }
-            TaskType::Terminal => {
-                let cmd = task
-                    .entities
-                    .iter()
-                    .find(|e| e.kind == CodeEntityKind::Command)
-                    .map(|e| e.value.clone())
-                    .unwrap_or_default();
-                steps.push(PlanStep::ToolCall {
-                    call: tools::ToolCall {
-                        name: "run_terminal".to_owned(),
-                        args: serde_json::json!({ "cmd": cmd }),
-                    },
-                });
-            }
-            TaskType::Chat => {
-                steps.push(PlanStep::Echo {
-                    text: format!("received: {}", task.raw_input),
-                });
-            }
-        }
-
-        if steps.len() > max_steps {
-            return Err(error::LunaError::invalid_input(format!(
-                "planned steps too many: {} > {}",
-                steps.len(),
-                max_steps
-            )));
-        }
-
-        let estimated_tokens = estimate_tokens(&task.raw_input) + steps.len() * 30;
-        Ok(Plan {
-            steps,
-            estimated_tokens,
-        })
-    }
-}
-
 struct ActExecutor {
     session_id: String,
     request_id: String,
@@ -388,13 +310,14 @@ impl ActExecutor {
             max_bytes: self.budget.max_io_bytes,
         };
 
-        let mut final_output = String::new();
+        let mut step_outputs: Vec<(usize, String, String)> = Vec::new(); // (step_id, step_label, output)
 
         for (i, step) in plan.steps.iter().enumerate() {
             let step_id = i + 1;
+            let step_label = step.label();
             events.emit(&RuntimeEvent::TparStepStarted {
                 step_id,
-                step: step.label(),
+                step: step_label.clone(),
             });
 
             let outcome = self.execute_step(step, task, &tool_ctx, repo_root.as_deref(), events);
@@ -422,44 +345,60 @@ impl ActExecutor {
                 state: serde_json::json!({
                     "task_type": task.task_type,
                     "step_id": step_id,
-                    "step": step.label(),
+                    "step": step_label,
                 }),
                 action: serde_json::to_value(step).unwrap_or(Value::Null),
                 reward: if ok { 0.2 } else { -0.5 },
                 outcome: serde_json::json!({ "ok": ok, "output_len": out_text.len() }),
             });
 
-            if !out_text.is_empty() {
-                if !final_output.is_empty() {
-                    final_output.push('\n');
-                }
-                final_output.push_str(&out_text);
+            // Collect non-empty outputs with truncation
+            let trimmed = out_text.trim();
+            if !trimmed.is_empty() {
+                let display = if trimmed.len() > 500 {
+                    format!("{}... [truncated, {} more chars]", &trimmed[..500], trimmed.len() - 500)
+                } else {
+                    trimmed.to_string()
+                };
+                step_outputs.push((step_id, step_label, display));
             }
 
             if let Some(review) = review {
                 if matches!(review, ReviewResult::NeedsRollback { .. }) {
                     let _ = self.rollback(&tool_ctx);
                 }
-                let msg = match &review {
-                    ReviewResult::NeedsRevision { reason } => format!("❌ 需要重试：{reason}"),
-                    ReviewResult::NeedsRollback { reason } => {
-                        format!("❌ 已回滚：{reason}")
-                    }
-                    ReviewResult::Success => "".to_owned(),
-                };
-                if !msg.is_empty() {
-                    if !final_output.is_empty() {
-                        final_output.push('\n');
-                    }
-                    final_output.push_str(&msg);
+                // Build formatted output on error
+                let mut final_output = String::new();
+                final_output.push_str(&format!("❌ Step {} failed\n", step_id));
+                if let ReviewResult::NeedsRevision { reason } = &review {
+                    final_output.push_str(&format!("Reason: {}\n", reason));
                 }
                 return Ok((final_output, review));
             }
         }
 
-        if final_output.is_empty() {
-            final_output = format!("received: {}", task.raw_input);
-        }
+        // Build formatted final output
+        let final_output = if step_outputs.is_empty() {
+            format!("✅ Completed: {}", task.raw_input)
+        } else {
+            let mut out = String::new();
+            out.push_str(&format!("📋 Plan executed ({} steps)\n", plan.steps.len()));
+            out.push_str("═".repeat(40).as_str());
+            out.push('\n');
+            for (step_id, label, output) in step_outputs {
+                out.push_str(&format!("\n[Step {}] {}\n", step_id, label));
+                out.push_str("─".repeat(30).as_str());
+                out.push('\n');
+                out.push_str(&output);
+                out.push('\n');
+            }
+            out.push('\n');
+            out.push_str("═".repeat(40).as_str());
+            out.push('\n');
+            out.push_str("✅ Done\n");
+            out
+        };
+
         Ok((final_output, ReviewResult::Success))
     }
 
@@ -476,6 +415,10 @@ impl ActExecutor {
                 ok: true,
                 output: text.clone(),
             }),
+            PlanStep::Think { text } => Ok(StepOutcome {
+                ok: true,
+                output: format!("🤔 {}", text),
+            }),
             PlanStep::Intelligence { style: _, query } => {
                 let router = crate::router::RuntimeRouter::default();
                 let out = router
@@ -485,6 +428,22 @@ impl ActExecutor {
                     ok: true,
                     output: out,
                 })
+            }
+            PlanStep::Verify { cmd } => {
+                let call = tools::ToolCall {
+                    name: "run_terminal".to_owned(),
+                    args: serde_json::json!({"cmd":cmd}),
+                };
+                self.check_step_safety(task, &call)?;
+                let res = self.tools.run(tool_ctx, &call)?;
+                if res.ok {
+                    Ok(StepOutcome {
+                        ok: true,
+                        output: res.stdout,
+                    })
+                } else {
+                    Err(LunaError::invalid_input(res.stderr))
+                }
             }
             PlanStep::ToolCall { call } => {
                 self.check_step_safety(task, call)?;
@@ -559,23 +518,6 @@ impl ActExecutor {
                 .with_context(|| format!("rollback write: {}", abs.display()))?;
         }
         Ok(())
-    }
-}
-
-fn extract_edit_payload(task: &Task) -> Option<(usize, String)> {
-    let line_1 = task
-        .entities
-        .iter()
-        .find(|e| e.kind == CodeEntityKind::Line)
-        .and_then(|e| e.value.parse::<usize>().ok());
-    let new_line = task
-        .entities
-        .iter()
-        .find(|e| e.kind == CodeEntityKind::Identifier)
-        .map(|e| e.value.clone());
-    match (line_1, new_line) {
-        (Some(l), Some(s)) => Some((l, s)),
-        _ => None,
     }
 }
 
@@ -663,13 +605,7 @@ fn parse_edit_line_to(input: &str) -> Option<(String, usize, String)> {
     Some((path.to_owned(), line_1, new_line.to_owned()))
 }
 
-fn estimate_tokens(s: &str) -> usize {
-    // Very rough heuristic: 1 token ~= 4 chars (ASCII-ish).
-    s.chars().count().div_ceil(4)
-}
-
 // repo root resolution is shared with runtime router.
-
 fn now_micros() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -711,6 +647,7 @@ mod tests {
                     max_io_bytes: 1024,
                     max_steps: 8,
                 },
+                planner: Arc::new(crate::planner::RuleBasedPlanner::new()),
             },
             &mut events,
         )
@@ -739,6 +676,7 @@ mod tests {
                     max_io_bytes: 1024,
                     max_steps: 8,
                 },
+                planner: Arc::new(crate::planner::RuleBasedPlanner::new()),
             },
             &mut events,
         )

@@ -308,6 +308,7 @@ impl LunaRuntime {
                 trajectory: self.config.trajectory(),
                 tools: self.config.tools(),
                 budget: self.config.budget(),
+                planner: self.config.planner(),
             },
             events,
         )
