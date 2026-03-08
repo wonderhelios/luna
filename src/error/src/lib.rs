@@ -13,6 +13,9 @@ pub enum LunaError {
     #[error("not found: {0}")]
     NotFound(String),
 
+    #[error("internal error: {0}")]
+    Internal(String),
+
     #[error(
         "io error {path}: {source}",
         path = path
@@ -51,6 +54,11 @@ impl LunaError {
     #[must_use]
     pub fn io(path: Option<PathBuf>, err: std::io::Error) -> Self {
         Self::Io { path, source: err }
+    }
+
+    #[must_use]
+    pub fn internal(message: impl Into<String>) -> Self {
+        Self::Internal(message.into())
     }
 
     #[must_use]

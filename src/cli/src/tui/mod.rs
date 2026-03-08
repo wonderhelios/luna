@@ -161,8 +161,20 @@ fn handle_ui_msg(app: &mut state::AppState, msg: UiMsg) {
             app.scroll_y = usize::MAX / 2;
         }
         UiMsg::Event { event } => {
-            // Streaming events only update status bar, don't reset busy
+            // Streaming events update status bar
             app.status = format_event_status(&event);
+            // Also append important events to conversation for visibility
+            match &event {
+                RuntimeEvent::TparPlanBuilt { plan } => {
+                    if plan.contains("deepseek") {
+                        app.push_system("🧠 Generating plan with DeepSeek...".to_owned());
+                    }
+                }
+                RuntimeEvent::TparStepStarted { step_id, step } => {
+                    app.push_system(format!("  [Step {}] {}", step_id, step));
+                }
+                _ => {}
+            }
         }
         UiMsg::Err { err } => {
             app.busy = false;

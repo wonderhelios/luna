@@ -3,6 +3,7 @@
 pub mod command;
 pub mod config;
 pub mod intent;
+pub mod planner;
 pub mod recorder;
 pub mod recorder_jsonl;
 pub mod render;

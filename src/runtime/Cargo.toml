@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 tracing = { workspace = true }
+tokio = { workspace = true }
 session = { path = "../session" }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -13,3 +14,4 @@ intelligence = { path = "../intelligence" }
 tools = { path = "../tools" }
 uuid = { workspace = true }
 error = { path = "../error" }
+llm = { path = "../llm" }

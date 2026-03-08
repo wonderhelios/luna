@@ -1,7 +1,9 @@
+use crate::planner;
 use crate::recorder::{NoopTrajectoryRecorder, TrajectoryRecorder};
 use crate::recorder_jsonl::JsonlTrajectoryRecorder;
 use crate::safety::{RuleBasedSafetyGuard, SafetyGuard};
 use session::{InMemorySessionStore, JsonlSessionStore, SessionStore};
+use std::any::Any;
 use std::sync::Arc;
 use tools::ToolRegistry;
 
@@ -32,6 +34,7 @@ pub struct RuntimeConfig {
     safety: Arc<dyn SafetyGuard>,
     tools: Arc<ToolRegistry>,
     budget: TokenBudget,
+    planner: Arc<dyn planner::TaskPlanner>,
 }
 
 impl RuntimeConfig {
@@ -64,6 +67,11 @@ impl RuntimeConfig {
         self
     }
 
+    pub fn with_planner(mut self, planner: Arc<dyn planner::TaskPlanner>) -> Self {
+        self.planner = planner;
+        self
+    }
+
     pub fn session_store(&self) -> Arc<dyn SessionStore> {
         Arc::clone(&self.session_store)
     }
@@ -83,6 +91,9 @@ impl RuntimeConfig {
     pub fn budget(&self) -> TokenBudget {
         self.budget.clone()
     }
+    pub fn planner(&self) -> Arc<dyn planner::TaskPlanner> {
+        Arc::clone(&self.planner)
+    }
 }
 
 impl Default for RuntimeConfig {
@@ -95,12 +106,33 @@ impl Default for RuntimeConfig {
             .unwrap_or_else(|| Arc::new(NoopTrajectoryRecorder));
         let safety: Arc<dyn SafetyGuard> = Arc::new(RuleBasedSafetyGuard::new(32));
         let tools = Arc::new(ToolRegistry::new());
+
+        // Try to create real LLM client from env
+        let llm_client: Arc<dyn llm::LLMClient> =
+            llm::OpenAIClient::try_from_env()
+                .map(|c| Arc::new(c) as Arc<dyn llm::LLMClient>)
+                .unwrap_or_else(|| Arc::new(llm::DisabledClient));
+
+        // Auto-enable LLM planner if client is configured, or respect explicit LUNA_PLANNER setting
+        let has_llm_client = llm_client.as_ref().type_id() != std::any::TypeId::of::<llm::DisabledClient>();
+        let prefer_llm = std::env::var("LUNA_PLANNER")
+            .ok()
+            .map(|v| v.eq_ignore_ascii_case("llm"))
+            .unwrap_or(has_llm_client); // Auto-enable if LLM client is available
+
+        let rule = Arc::new(planner::RuleBasedPlanner::new()) as Arc<dyn planner::TaskPlanner>;
+        let llm_planner = Arc::new(planner::LLMBasedPlanner::new(Arc::clone(&llm_client), 12))
+            as Arc<dyn planner::TaskPlanner>;
+        let planner: Arc<dyn planner::TaskPlanner> =
+            Arc::new(planner::PlannerSelector::new(prefer_llm, rule, llm_planner));
+
         Self {
             session_store,
             trajectory,
             safety,
             tools,
             budget: TokenBudget::default(),
+            planner,
         }
     }
 }
