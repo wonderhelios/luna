@@ -10,6 +10,7 @@ use serde_json::Value;
 use error::{LunaError, ResultExt as _};
 
 use crate::config::TokenBudget;
+use crate::context_bridge::create_refill_pipeline;
 use crate::planner::{PlannerContext, TaskPlanner};
 use crate::recorder::{TrajectoryRecorder, TrajectoryStep};
 use crate::response::{EventSink, RuntimeEvent};
@@ -627,28 +628,61 @@ fn now_micros() -> u64 {
 
 /// Collect context chunks from task entities
 ///
-/// This is a simplified implementation that extracts file paths and symbols
-/// from the task entities. A full implementation would use RefillPipeline
-/// for comprehensive context retrieval.
+/// Uses RefillPipeline for comprehensive context retrieval when available,
+/// falling back to simple file reading otherwise.
 fn collect_context_from_task(
     task: &Task,
     cwd: Option<&Path>,
 ) -> Vec<context::ContextChunk> {
-    use context::{ContextChunk, ContextType, SourceLocation, TextRange};
+    use context::{ContextChunk, ContextQuery, ContextType, SourceLocation, TextRange};
     use std::path::PathBuf;
 
+    // Try to create RefillPipeline if we have a valid repo root
+    let repo_root = cwd.unwrap_or(Path::new(".")).to_path_buf();
+    if let Some(pipeline) = create_refill_pipeline(repo_root.clone()) {
+        // Build query from task entities
+        let mut symbols = Vec::new();
+        let mut paths = Vec::new();
+
+        for entity in &task.entities {
+            match entity.kind {
+                CodeEntityKind::Identifier => symbols.push(entity.value.clone()),
+                CodeEntityKind::Path => paths.push(PathBuf::from(&entity.value)),
+                _ => {}
+            }
+        }
+
+        // Use RefillPipeline if we have symbols or paths
+        if !symbols.is_empty() || !paths.is_empty() {
+            let query = ContextQuery::TaskDriven {
+                keywords: vec![task.raw_input.clone()],
+                paths,
+                symbols,
+            };
+
+            match pipeline.retrieve(&query, 10) {
+                Ok(index_chunks) => {
+                    return pipeline.refine(&index_chunks);
+                }
+                Err(e) => {
+                    tracing::warn!("RefillPipeline retrieve failed: {}", e);
+                    // Fall through to simple fallback
+                }
+            }
+        }
+    }
+
+    // Fallback: simple file reading
     let mut chunks = Vec::new();
 
-    // Extract paths from entities and try to read them
     for entity in &task.entities {
         if entity.kind == CodeEntityKind::Path {
             let path = PathBuf::from(&entity.value);
             let abs_path = cwd.map(|c| c.join(&path)).unwrap_or_else(|| path.clone());
 
-            // Try to read file if it exists
             if let Ok(content) = std::fs::read_to_string(&abs_path) {
                 let lines: Vec<&str> = content.lines().collect();
-                let line_count = lines.len().min(50); // Limit to 50 lines
+                let line_count = lines.len().min(50);
 
                 let summary = if lines.len() > 50 {
                     format!(
@@ -667,7 +701,7 @@ fn collect_context_from_task(
                 };
 
                 let source = SourceLocation {
-                    repo_root: cwd.unwrap_or(Path::new(".")).to_path_buf(),
+                    repo_root: repo_root.clone(),
                     rel_path: path,
                     range: TextRange::new(1, line_count),
                 };
@@ -677,7 +711,7 @@ fn collect_context_from_task(
         }
     }
 
-    // If no files found but task mentions symbols, add placeholder context
+    // If no files found but task mentions symbols, add placeholder
     if chunks.is_empty() && !task.entities.is_empty() {
         let symbols: Vec<String> = task
             .entities
@@ -695,7 +729,7 @@ fn collect_context_from_task(
             );
 
             let source = SourceLocation {
-                repo_root: cwd.unwrap_or(Path::new(".")).to_path_buf(),
+                repo_root,
                 rel_path: PathBuf::from("task_context"),
                 range: TextRange::new(1, 1),
             };

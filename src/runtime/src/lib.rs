@@ -2,6 +2,7 @@
 
 pub mod command;
 pub mod config;
+pub mod context_bridge;
 pub mod intent;
 pub mod planner;
 pub mod recorder;
