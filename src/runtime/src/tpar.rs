@@ -154,6 +154,11 @@ pub fn run_turn(
 
     // Collect context chunks from task entities
     let context_chunks = collect_context_from_task(&task, ctx.cwd.as_deref());
+    tracing::info!(
+        "Collected {} context chunks for task: {:?}",
+        context_chunks.len(),
+        task.raw_input
+    );
 
     // Plan with context
     let plan = ctx.planner.plan(
@@ -639,7 +644,10 @@ fn collect_context_from_task(
 
     // Try to create RefillPipeline if we have a valid repo root
     let repo_root = cwd.unwrap_or(Path::new(".")).to_path_buf();
+    tracing::debug!("Attempting to create RefillPipeline for: {}", repo_root.display());
+
     if let Some(pipeline) = create_refill_pipeline(repo_root.clone()) {
+        tracing::info!("RefillPipeline created successfully");
         // Build query from task entities
         let mut symbols = Vec::new();
         let mut paths = Vec::new();
@@ -659,17 +667,25 @@ fn collect_context_from_task(
                 paths,
                 symbols,
             };
+            tracing::info!("Using RefillPipeline with query: {:?}", query);
 
             match pipeline.retrieve(&query, 10) {
                 Ok(index_chunks) => {
-                    return pipeline.refine(&index_chunks);
+                    tracing::info!("RefillPipeline retrieved {} chunks", index_chunks.len());
+                    let refined = pipeline.refine(&index_chunks);
+                    tracing::info!("RefillPipeline refined to {} chunks", refined.len());
+                    return refined;
                 }
                 Err(e) => {
                     tracing::warn!("RefillPipeline retrieve failed: {}", e);
                     // Fall through to simple fallback
                 }
             }
+        } else {
+            tracing::warn!("No symbols or paths extracted from task");
         }
+    } else {
+        tracing::warn!("Failed to create RefillPipeline for: {}", repo_root.display());
     }
 
     // Fallback: simple file reading

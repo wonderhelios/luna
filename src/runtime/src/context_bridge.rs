@@ -178,11 +178,19 @@ fn source_location_to_intel_location(loc: &SourceLocation) -> IntelSymbolLocatio
 pub fn create_refill_pipeline(
     repo_root: PathBuf,
 ) -> Option<context::RefillPipeline> {
+    tracing::debug!("Creating RefillPipeline for: {}", repo_root.display());
+
     // Check if repo_root exists and is a directory
-    if !repo_root.exists() || !repo_root.is_dir() {
-        tracing::warn!("Repo root does not exist or is not a directory: {}", repo_root.display());
+    if !repo_root.exists() {
+        tracing::warn!("Repo root does not exist: {}", repo_root.display());
         return None;
     }
+    if !repo_root.is_dir() {
+        tracing::warn!("Repo root is not a directory: {}", repo_root.display());
+        return None;
+    }
+
+    tracing::debug!("Repo root validated, creating navigator...");
 
     // Create navigator
     let navigator: Arc<intelligence::TreeSitterNavigator<FsRepoFileProvider>> =
