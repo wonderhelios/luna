@@ -7,6 +7,7 @@ pub mod intent;
 pub mod planner;
 pub mod recorder;
 pub mod recorder_jsonl;
+pub mod refill_trigger;
 pub mod render;
 pub mod request;
 pub mod response;

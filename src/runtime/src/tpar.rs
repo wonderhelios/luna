@@ -26,6 +26,8 @@ pub struct TurnContext {
     pub tools: Arc<tools::ToolRegistry>,
     pub budget: TokenBudget,
     pub planner: Arc<dyn TaskPlanner>,
+    /// RefillPipeline for dynamic context supplementation
+    pub context_pipeline: Option<Arc<context::RefillPipeline>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -183,6 +185,7 @@ pub fn run_turn(
         ctx.trajectory,
         ctx.tools,
         ctx.budget,
+        ctx.context_pipeline.clone(),
     );
     let (out, review) = exec.execute(&plan, &task, events)?;
 
@@ -284,6 +287,8 @@ struct ActExecutor {
     budget: TokenBudget,
     // For rollback: keep original content for any edited files.
     original_files: HashMap<PathBuf, String>,
+    // Optional RefillPipeline for dynamic context supplementation
+    context_pipeline: Option<Arc<context::RefillPipeline>>,
 }
 
 impl ActExecutor {
@@ -295,6 +300,7 @@ impl ActExecutor {
         trajectory: Arc<dyn TrajectoryRecorder>,
         tools: Arc<tools::ToolRegistry>,
         budget: TokenBudget,
+        context_pipeline: Option<Arc<context::RefillPipeline>>,
     ) -> Self {
         Self {
             session_id: session_id.to_owned(),
@@ -305,6 +311,7 @@ impl ActExecutor {
             tools,
             budget,
             original_files: HashMap::new(),
+            context_pipeline,
         }
     }
 
@@ -643,7 +650,8 @@ fn collect_context_from_task(
     use std::path::PathBuf;
 
     // Try to create RefillPipeline if we have a valid repo root
-    let repo_root = cwd.unwrap_or(Path::new(".")).to_path_buf();
+    // Use resolve_repo_root to find the actual git repository root
+    let repo_root = crate::router::resolve_repo_root(cwd).unwrap_or_else(|| cwd.unwrap_or(Path::new(".")).to_path_buf());
     tracing::debug!("Attempting to create RefillPipeline for: {}", repo_root.display());
 
     if let Some(pipeline) = create_refill_pipeline(repo_root.clone()) {
@@ -792,6 +800,7 @@ mod tests {
                     max_steps: 8,
                 },
                 planner: Arc::new(crate::planner::RuleBasedPlanner::new()),
+                context_pipeline: None,
             },
             &mut events,
         )
@@ -838,6 +847,7 @@ mod tests {
                     max_steps: 8,
                 },
                 planner: Arc::new(crate::planner::RuleBasedPlanner::new()),
+                context_pipeline: None,
             },
             &mut events,
         )

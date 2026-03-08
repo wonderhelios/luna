@@ -309,6 +309,7 @@ impl LunaRuntime {
                 tools: self.config.tools(),
                 budget: self.config.budget(),
                 planner: self.config.planner(),
+                context_pipeline: None,
             },
             events,
         )
