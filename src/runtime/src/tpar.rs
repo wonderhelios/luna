@@ -151,11 +151,16 @@ pub fn run_turn(
         task: task.name().to_owned(),
     });
 
-    // Plan
+    // Collect context chunks from task entities
+    let context_chunks = collect_context_from_task(&task, ctx.cwd.as_deref());
+
+    // Plan with context
     let plan = ctx.planner.plan(
         &task,
         &PlannerContext {
             budget: ctx.budget.clone(),
+            context_chunks,
+            repo_root: ctx.cwd.clone(),
         },
         events,
     )?;
@@ -535,9 +540,12 @@ fn parse_terminal_intent(input: &str) -> Option<String> {
 }
 
 fn parse_edit_intent_min(input: &str) -> Option<(String, usize)> {
-    // "修改 <path> 第 <line> 行"
+    // "修改 <path> 第 <line> 行" 或 "修改一下 <path> 第 <line> 行"
     let s = input.trim();
-    let rest = s.strip_prefix("修改 ")?;
+    let rest = s
+        .strip_prefix("修改 ")
+        .or_else(|| s.strip_prefix("修改一下"))?
+        .trim_start();
     let idx = rest.find('第')?;
     let (path_part, rest) = rest.split_at(idx);
     let path = path_part.trim();
@@ -564,8 +572,12 @@ fn parse_edit_line_to(input: &str) -> Option<(String, usize, String)> {
     // Supported:
     // - "修改 <path> 第 <line> 行 为 <new_line>"
     // - "修改 <path> 第 <line> 行 成 <new_line>"
+    // - "修改一下 <path> 第 <line> 行 为 <new_line>"
     let s = input.trim();
-    let rest = s.strip_prefix("修改 ")?;
+    let rest = s
+        .strip_prefix("修改 ")
+        .or_else(|| s.strip_prefix("修改一下"))?
+        .trim_start();
     let idx = rest.find('第')?;
     let (path_part, rest) = rest.split_at(idx);
     let path = path_part.trim();
@@ -613,6 +625,88 @@ fn now_micros() -> u64 {
         .as_micros() as u64
 }
 
+/// Collect context chunks from task entities
+///
+/// This is a simplified implementation that extracts file paths and symbols
+/// from the task entities. A full implementation would use RefillPipeline
+/// for comprehensive context retrieval.
+fn collect_context_from_task(
+    task: &Task,
+    cwd: Option<&Path>,
+) -> Vec<context::ContextChunk> {
+    use context::{ContextChunk, ContextType, SourceLocation, TextRange};
+    use std::path::PathBuf;
+
+    let mut chunks = Vec::new();
+
+    // Extract paths from entities and try to read them
+    for entity in &task.entities {
+        if entity.kind == CodeEntityKind::Path {
+            let path = PathBuf::from(&entity.value);
+            let abs_path = cwd.map(|c| c.join(&path)).unwrap_or_else(|| path.clone());
+
+            // Try to read file if it exists
+            if let Ok(content) = std::fs::read_to_string(&abs_path) {
+                let lines: Vec<&str> = content.lines().collect();
+                let line_count = lines.len().min(50); // Limit to 50 lines
+
+                let summary = if lines.len() > 50 {
+                    format!(
+                        "// File: {} ({} lines total, showing first 50)\n{}",
+                        entity.value,
+                        lines.len(),
+                        lines[..50].join("\n")
+                    )
+                } else {
+                    format!(
+                        "// File: {} ({} lines)\n{}",
+                        entity.value,
+                        lines.len(),
+                        content
+                    )
+                };
+
+                let source = SourceLocation {
+                    repo_root: cwd.unwrap_or(Path::new(".")).to_path_buf(),
+                    rel_path: path,
+                    range: TextRange::new(1, line_count),
+                };
+
+                chunks.push(ContextChunk::new(summary, source, ContextType::FileOverview));
+            }
+        }
+    }
+
+    // If no files found but task mentions symbols, add placeholder context
+    if chunks.is_empty() && !task.entities.is_empty() {
+        let symbols: Vec<String> = task
+            .entities
+            .iter()
+            .filter(|e| e.kind == CodeEntityKind::Identifier)
+            .map(|e| e.value.clone())
+            .collect();
+
+        if !symbols.is_empty() {
+            let context_text = format!(
+                "// Task mentions symbols: {}\n// Working directory: {}",
+                symbols.join(", "),
+                cwd.map(|p| p.display().to_string())
+                    .unwrap_or_else(|| ".".to_string())
+            );
+
+            let source = SourceLocation {
+                repo_root: cwd.unwrap_or(Path::new(".")).to_path_buf(),
+                rel_path: PathBuf::from("task_context"),
+                range: TextRange::new(1, 1),
+            };
+
+            chunks.push(ContextChunk::new(context_text, source, ContextType::CodeSnippet));
+        }
+    }
+
+    chunks
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -656,6 +750,23 @@ mod tests {
         assert!(out.contains("edited:"), "out={out}");
         let updated = std::fs::read_to_string(&file).unwrap();
         assert_eq!(updated, "hello\nWORLD\n");
+    }
+
+    #[test]
+    fn test_parse_edit_intent_with_yixia() {
+        // Test "修改一下" format
+        let result = parse_edit_intent_min("修改一下 main.rs 第 10 行");
+        assert!(result.is_some(), "Should parse '修改一下' format");
+        let (path, line) = result.unwrap();
+        assert_eq!(path, "main.rs");
+        assert_eq!(line, 10);
+
+        // Test without "一下"
+        let result2 = parse_edit_intent_min("修改 main.rs 第 10 行");
+        assert!(result2.is_some());
+        let (path2, line2) = result2.unwrap();
+        assert_eq!(path2, "main.rs");
+        assert_eq!(line2, 10);
     }
 
     #[test]

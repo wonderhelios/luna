@@ -5,6 +5,7 @@ members = [
     "src/error",
     "src/llm",
     "src/intelligence",
+    "src/context",
     "src/tools",
     "src/session",
     "src/runtime",
