@@ -9,9 +9,23 @@ use crate::tpar::{CodeEntityKind, Plan, PlanStep, Task, TaskType};
 /// Planner-only context.
 ///
 /// Keep it minimal to avoid tight coupling with execution.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PlannerContext {
     pub budget: TokenBudget,
+    /// Context chunks from Context Pipeline
+    pub context_chunks: Vec<context::ContextChunk>,
+    /// Repository root for path resolution
+    pub repo_root: Option<std::path::PathBuf>,
+}
+
+impl std::fmt::Debug for PlannerContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PlannerContext")
+            .field("budget", &self.budget)
+            .field("context_chunks", &self.context_chunks.len())
+            .field("repo_root", &self.repo_root)
+            .finish()
+    }
 }
 
 pub trait TaskPlanner: Send + Sync {
@@ -224,7 +238,12 @@ impl LLMBasedPlanner {
         }
     }
 
-    fn build_prompt(task: &Task, budget: &TokenBudget) -> String {
+    fn build_prompt(
+        task: &Task,
+        budget: &TokenBudget,
+        repo_root: Option<&std::path::Path>,
+        context_chunks: &[context::ContextChunk],
+    ) -> String {
         let example = r#"{
   "steps": [
     {"kind": "think", "text": "Need to find the function"},
@@ -234,8 +253,28 @@ impl LLMBasedPlanner {
   ],
   "estimated_tokens": 100
 }"#;
+
+        // Build context section
+        let context_section = if context_chunks.is_empty() {
+            String::from("No relevant code context found.")
+        } else {
+            let mut ctx = String::from("\n");
+            for chunk in context_chunks {
+                ctx.push_str(&chunk.format_for_prompt());
+                ctx.push('\n');
+            }
+            ctx
+        };
+
+        // Build project root section
+        let repo_section = repo_root
+            .map(|p| format!("Project root: {}\n", p.display()))
+            .unwrap_or_default();
+
         format!(
             "You are a planning engine for a code assistant.\n\
+{}\
+Relevant code context:\n{}\n\n\
 Task type: {:?}\nUser input: {}\n\n\
 Create a plan using these step kinds:\n\
 - think: reasoning text (optional)\n\
@@ -251,12 +290,13 @@ CRITICAL RULES:\n\
 - The \"kind\" field MUST be exactly one of: \"think\", \"intelligence\", \"tool_call\", \"verify\", \"echo\" (NEVER use \"navigation\", \"search\", \"read\", \"edit\" or other values)\n\
 - run_terminal args MUST have {{\"cmd\": \"...\"}}, not {{\"command\": \"...\"}}\n\
 - All tool args must match the exact field names shown above\n\
+- Use file paths from the context when available\n\
 - Return ONLY valid JSON, no markdown, no backticks\n\n\
 Constraints:\n\
 - Maximum {} steps\n\
 - Return ONLY valid JSON\n\n\
 Example output:\n{}\n",
-            task.task_type, task.raw_input, budget.max_steps, example
+            repo_section, context_section, task.task_type, task.raw_input, budget.max_steps, example
         )
     }
 
@@ -324,7 +364,7 @@ impl TaskPlanner for LLMBasedPlanner {
         ctx: &PlannerContext,
         events: &mut dyn crate::response::EventSink,
     ) -> error::Result<Plan> {
-        let prompt = Self::build_prompt(task, &ctx.budget);
+        let prompt = Self::build_prompt(task, &ctx.budget, ctx.repo_root.as_deref(), &ctx.context_chunks);
 
         let ev = RuntimeEvent::TparPlanBuilt {
             plan: "planner=llm (deepseek) request".to_owned(),
@@ -399,10 +439,17 @@ impl TaskPlanner for PlannerSelector {
 
         let try_llm = self.should_use_llm(task);
         if try_llm {
-            // Try LLM first, return its error if it fails
-            let plan = self.llm.plan(task, ctx, events)?;
-            validator.validate(&plan)?;
-            return Ok(plan);
+            // Try LLM first, fallback to rule-based on failure
+            match self.llm.plan(task, ctx, events) {
+                Ok(plan) => {
+                    validator.validate(&plan)?;
+                    return Ok(plan);
+                }
+                Err(e) => {
+                    tracing::warn!("LLM planner failed, falling back to rule-based: {}", e);
+                    // Fall through to rule-based
+                }
+            }
         }
 
         // Fallback to rule-based
@@ -433,9 +480,15 @@ mod tests {
                 max_io_bytes: 1024,
                 max_steps: 8,
             },
+            context_chunks: Vec::new(),
+            repo_root: None,
         };
 
-        let llm_client = Arc::new(llm::MockClient::new(vec!["not json".to_owned()]));
+        // Provide two responses: first fails, second also fails (triggering fallback)
+        let llm_client = Arc::new(llm::MockClient::new(vec![
+            "not json".to_owned(),      // First attempt - invalid
+            "still not json".to_owned(), // Repair attempt - also invalid, triggering fallback
+        ]));
         let llm_planner = Arc::new(LLMBasedPlanner::new(llm_client, ctx.budget.max_steps))
             as Arc<dyn TaskPlanner>;
         let rule_planner = Arc::new(RuleBasedPlanner::new()) as Arc<dyn TaskPlanner>;
@@ -490,6 +543,8 @@ mod tests {
                 max_io_bytes: 1024,
                 max_steps: 8,
             },
+            context_chunks: Vec::new(),
+            repo_root: None,
         };
 
         let task = mk_task(TaskType::Chat, "修复项目");
@@ -534,6 +589,8 @@ mod tests {
                     max_io_bytes: 1024,
                     max_steps: 8,
                 },
+                context_chunks: Vec::new(),
+                repo_root: None,
             };
             let mut events = Vec::<RuntimeEvent>::new();
 

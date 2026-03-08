@@ -11,6 +11,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 parking_lot = { workspace = true }
 intelligence = { path = "../intelligence" }
+context = { path = "../context" }
 tools = { path = "../tools" }
 uuid = { workspace = true }
 error = { path = "../error" }
