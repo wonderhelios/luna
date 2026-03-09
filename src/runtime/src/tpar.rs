@@ -526,7 +526,7 @@ impl ActExecutor {
     }
 }
 
-fn parse_terminal_intent(input: &str) -> Option<String> {
+pub(crate) fn parse_terminal_intent(input: &str) -> Option<String> {
     let s = input.trim();
     for prefix in ["运行 ", "执行 ", "run "] {
         if let Some(rest) = s.strip_prefix(prefix) {
@@ -539,7 +539,7 @@ fn parse_terminal_intent(input: &str) -> Option<String> {
     None
 }
 
-fn parse_edit_intent_min(input: &str) -> Option<(String, usize)> {
+pub(crate) fn parse_edit_intent_min(input: &str) -> Option<(String, usize)> {
     // "修改 <path> 第 <line> 行" 或 "修改一下 <path> 第 <line> 行"
     let s = input.trim();
     let rest = s
@@ -568,7 +568,7 @@ fn parse_edit_intent_min(input: &str) -> Option<(String, usize)> {
     Some((path.to_owned(), line_1))
 }
 
-fn parse_edit_line_to(input: &str) -> Option<(String, usize, String)> {
+pub(crate) fn parse_edit_line_to(input: &str) -> Option<(String, usize, String)> {
     // Supported:
     // - "修改 <path> 第 <line> 行 为 <new_line>"
     // - "修改 <path> 第 <line> 行 成 <new_line>"
