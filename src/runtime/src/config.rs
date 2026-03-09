@@ -1,12 +1,15 @@
-use crate::intent_classifier::{ClassifierConfig, ClassifierKind, IntentClassifier, RuleBasedClassifier};
+use std::any::Any;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use session::{InMemorySessionStore, JsonlSessionStore, SessionStore};
+use tools::ToolRegistry;
+
+use crate::intent_classifier::{ClassifierConfig, ClassifierKind, IntentClassifier};
 use crate::planner;
 use crate::recorder::{NoopTrajectoryRecorder, TrajectoryRecorder};
 use crate::recorder_jsonl::JsonlTrajectoryRecorder;
 use crate::safety::{RuleBasedSafetyGuard, SafetyGuard};
-use session::{InMemorySessionStore, JsonlSessionStore, SessionStore};
-use std::any::Any;
-use std::sync::Arc;
-use tools::ToolRegistry;
 
 #[derive(Debug, Clone)]
 pub struct TokenBudget {
@@ -37,6 +40,7 @@ pub struct RuntimeConfig {
     budget: TokenBudget,
     planner: Arc<dyn planner::TaskPlanner>,
     intent_classifier: Arc<dyn IntentClassifier>,
+    memory: memory::MemoryStore,
 }
 
 impl RuntimeConfig {
@@ -104,6 +108,15 @@ impl RuntimeConfig {
         self.intent_classifier = classifier;
         self
     }
+
+    pub fn memory(&self) -> &memory::MemoryStore {
+        &self.memory
+    }
+
+    pub fn with_memory(mut self, memory: memory::MemoryStore) -> Self {
+        self.memory = memory;
+        self
+    }
 }
 
 impl Default for RuntimeConfig {
@@ -150,6 +163,11 @@ impl Default for RuntimeConfig {
             if has_llm_client { Some(Arc::clone(&llm_client)) } else { None }
         );
 
+        // Initialize memory store
+        let memory = memory::auto_detect(
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+        );
+
         Self {
             session_store,
             trajectory,
@@ -158,6 +176,7 @@ impl Default for RuntimeConfig {
             budget: TokenBudget::default(),
             planner,
             intent_classifier,
+            memory,
         }
     }
 }
