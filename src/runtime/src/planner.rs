@@ -278,10 +278,10 @@ Relevant code context:\n{}\n\n\
 Task type: {:?}\nUser input: {}\n\n\
 Create a plan using these step kinds:\n\
 - think: reasoning text (optional)\n\
-- intelligence: query for code navigation/explanation\n\
+- intelligence: query for code navigation/explanation (ONLY if context above does not contain the answer)\n\
 - tool_call: invoke read_file, edit_file, or run_terminal\n\
 - verify: run a command to verify changes\n\
-- echo: final response to user\n\n\
+- echo: final response to user (MUST provide a helpful answer based on the context, NOT just echo the user input)\n\n\
 Available tools and their REQUIRED parameters:\n\
 1. read_file: {{\"path\": \"file/path.rs\"}}\n\
 2. edit_file: {{\"path\": \"file.rs\", \"line_1\": 10, \"new_line\": \"new content\"}} OR {{\"path\": \"file.rs\", \"start_line_1\": 10, \"end_line_1\": 15, \"replace_with\": \"new content\"}}\n\
@@ -291,6 +291,7 @@ CRITICAL RULES:\n\
 - run_terminal args MUST have {{\"cmd\": \"...\"}}, not {{\"command\": \"...\"}}\n\
 - All tool args must match the exact field names shown above\n\
 - Use file paths from the context when available\n\
+- If the context already shows the answer, use 'echo' to respond directly, NOT 'intelligence'\n\
 - Return ONLY valid JSON, no markdown, no backticks\n\n\
 Constraints:\n\
 - Maximum {} steps\n\

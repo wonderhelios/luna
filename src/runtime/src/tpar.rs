@@ -10,6 +10,7 @@ use serde_json::Value;
 use error::{LunaError, ResultExt as _};
 
 use crate::config::TokenBudget;
+use crate::context_bridge::create_refill_pipeline;
 use crate::planner::{PlannerContext, TaskPlanner};
 use crate::recorder::{TrajectoryRecorder, TrajectoryStep};
 use crate::response::{EventSink, RuntimeEvent};
@@ -25,6 +26,8 @@ pub struct TurnContext {
     pub tools: Arc<tools::ToolRegistry>,
     pub budget: TokenBudget,
     pub planner: Arc<dyn TaskPlanner>,
+    /// RefillPipeline for dynamic context supplementation
+    pub context_pipeline: Option<Arc<context::RefillPipeline>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -153,6 +156,11 @@ pub fn run_turn(
 
     // Collect context chunks from task entities
     let context_chunks = collect_context_from_task(&task, ctx.cwd.as_deref());
+    tracing::info!(
+        "Collected {} context chunks for task: {:?}",
+        context_chunks.len(),
+        task.raw_input
+    );
 
     // Plan with context
     let plan = ctx.planner.plan(
@@ -177,6 +185,7 @@ pub fn run_turn(
         ctx.trajectory,
         ctx.tools,
         ctx.budget,
+        ctx.context_pipeline.clone(),
     );
     let (out, review) = exec.execute(&plan, &task, events)?;
 
@@ -278,6 +287,8 @@ struct ActExecutor {
     budget: TokenBudget,
     // For rollback: keep original content for any edited files.
     original_files: HashMap<PathBuf, String>,
+    // Optional RefillPipeline for dynamic context supplementation
+    context_pipeline: Option<Arc<context::RefillPipeline>>,
 }
 
 impl ActExecutor {
@@ -289,6 +300,7 @@ impl ActExecutor {
         trajectory: Arc<dyn TrajectoryRecorder>,
         tools: Arc<tools::ToolRegistry>,
         budget: TokenBudget,
+        context_pipeline: Option<Arc<context::RefillPipeline>>,
     ) -> Self {
         Self {
             session_id: session_id.to_owned(),
@@ -299,6 +311,7 @@ impl ActExecutor {
             tools,
             budget,
             original_files: HashMap::new(),
+            context_pipeline,
         }
     }
 
@@ -627,28 +640,73 @@ fn now_micros() -> u64 {
 
 /// Collect context chunks from task entities
 ///
-/// This is a simplified implementation that extracts file paths and symbols
-/// from the task entities. A full implementation would use RefillPipeline
-/// for comprehensive context retrieval.
+/// Uses RefillPipeline for comprehensive context retrieval when available,
+/// falling back to simple file reading otherwise.
 fn collect_context_from_task(
     task: &Task,
     cwd: Option<&Path>,
 ) -> Vec<context::ContextChunk> {
-    use context::{ContextChunk, ContextType, SourceLocation, TextRange};
+    use context::{ContextChunk, ContextQuery, ContextType, SourceLocation, TextRange};
     use std::path::PathBuf;
 
+    // Try to create RefillPipeline if we have a valid repo root
+    // Use resolve_repo_root to find the actual git repository root
+    let repo_root = crate::router::resolve_repo_root(cwd).unwrap_or_else(|| cwd.unwrap_or(Path::new(".")).to_path_buf());
+    tracing::debug!("Attempting to create RefillPipeline for: {}", repo_root.display());
+
+    if let Some(pipeline) = create_refill_pipeline(repo_root.clone()) {
+        tracing::info!("RefillPipeline created successfully");
+        // Build query from task entities
+        let mut symbols = Vec::new();
+        let mut paths = Vec::new();
+
+        for entity in &task.entities {
+            match entity.kind {
+                CodeEntityKind::Identifier => symbols.push(entity.value.clone()),
+                CodeEntityKind::Path => paths.push(PathBuf::from(&entity.value)),
+                _ => {}
+            }
+        }
+
+        // Use RefillPipeline if we have symbols or paths
+        if !symbols.is_empty() || !paths.is_empty() {
+            let query = ContextQuery::TaskDriven {
+                keywords: vec![task.raw_input.clone()],
+                paths,
+                symbols,
+            };
+            tracing::info!("Using RefillPipeline with query: {:?}", query);
+
+            match pipeline.retrieve(&query, 10) {
+                Ok(index_chunks) => {
+                    tracing::info!("RefillPipeline retrieved {} chunks", index_chunks.len());
+                    let refined = pipeline.refine(&index_chunks);
+                    tracing::info!("RefillPipeline refined to {} chunks", refined.len());
+                    return refined;
+                }
+                Err(e) => {
+                    tracing::warn!("RefillPipeline retrieve failed: {}", e);
+                    // Fall through to simple fallback
+                }
+            }
+        } else {
+            tracing::warn!("No symbols or paths extracted from task");
+        }
+    } else {
+        tracing::warn!("Failed to create RefillPipeline for: {}", repo_root.display());
+    }
+
+    // Fallback: simple file reading
     let mut chunks = Vec::new();
 
-    // Extract paths from entities and try to read them
     for entity in &task.entities {
         if entity.kind == CodeEntityKind::Path {
             let path = PathBuf::from(&entity.value);
             let abs_path = cwd.map(|c| c.join(&path)).unwrap_or_else(|| path.clone());
 
-            // Try to read file if it exists
             if let Ok(content) = std::fs::read_to_string(&abs_path) {
                 let lines: Vec<&str> = content.lines().collect();
-                let line_count = lines.len().min(50); // Limit to 50 lines
+                let line_count = lines.len().min(50);
 
                 let summary = if lines.len() > 50 {
                     format!(
@@ -667,7 +725,7 @@ fn collect_context_from_task(
                 };
 
                 let source = SourceLocation {
-                    repo_root: cwd.unwrap_or(Path::new(".")).to_path_buf(),
+                    repo_root: repo_root.clone(),
                     rel_path: path,
                     range: TextRange::new(1, line_count),
                 };
@@ -677,7 +735,7 @@ fn collect_context_from_task(
         }
     }
 
-    // If no files found but task mentions symbols, add placeholder context
+    // If no files found but task mentions symbols, add placeholder
     if chunks.is_empty() && !task.entities.is_empty() {
         let symbols: Vec<String> = task
             .entities
@@ -695,7 +753,7 @@ fn collect_context_from_task(
             );
 
             let source = SourceLocation {
-                repo_root: cwd.unwrap_or(Path::new(".")).to_path_buf(),
+                repo_root,
                 rel_path: PathBuf::from("task_context"),
                 range: TextRange::new(1, 1),
             };
@@ -742,6 +800,7 @@ mod tests {
                     max_steps: 8,
                 },
                 planner: Arc::new(crate::planner::RuleBasedPlanner::new()),
+                context_pipeline: None,
             },
             &mut events,
         )
@@ -788,6 +847,7 @@ mod tests {
                     max_steps: 8,
                 },
                 planner: Arc::new(crate::planner::RuleBasedPlanner::new()),
+                context_pipeline: None,
             },
             &mut events,
         )

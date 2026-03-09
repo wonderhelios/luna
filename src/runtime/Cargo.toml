@@ -16,3 +16,4 @@ tools = { path = "../tools" }
 uuid = { workspace = true }
 error = { path = "../error" }
 llm = { path = "../llm" }
+_core = { path = "../core", package = "core" }
