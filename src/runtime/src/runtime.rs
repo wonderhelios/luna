@@ -298,6 +298,11 @@ impl LunaRuntime {
         cwd: Option<&Path>,
         events: &mut dyn EventSink,
     ) -> Result<String> {
+        // Load project memory
+        let memory = self.config.memory().load_or_default(
+            cwd.unwrap_or_else(|| std::path::Path::new("."))
+        );
+
         crate::tpar::run_turn(
             user_input,
             crate::tpar::TurnContext {
@@ -310,6 +315,8 @@ impl LunaRuntime {
                 budget: self.config.budget(),
                 planner: self.config.planner(),
                 intent_classifier: self.config.intent_classifier(),
+                memory: Some(memory),
+                memory_store: Some(self.config.memory().clone()),
             },
             events,
         )

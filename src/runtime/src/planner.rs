@@ -16,6 +16,8 @@ pub struct PlannerContext {
     pub context_chunks: Vec<context::ContextChunk>,
     /// Repository root for path resolution
     pub repo_root: Option<std::path::PathBuf>,
+    /// Project memory (learned commands, preferences)
+    pub memory: Option<memory::ProjectMemory>,
 }
 
 impl std::fmt::Debug for PlannerContext {
@@ -24,6 +26,7 @@ impl std::fmt::Debug for PlannerContext {
             .field("budget", &self.budget)
             .field("context_chunks", &self.context_chunks.len())
             .field("repo_root", &self.repo_root)
+            .field("memory", &self.memory.is_some())
             .finish()
     }
 }
@@ -243,6 +246,7 @@ impl LLMBasedPlanner {
         budget: &TokenBudget,
         repo_root: Option<&std::path::Path>,
         context_chunks: &[context::ContextChunk],
+        memory: Option<&memory::ProjectMemory>,
     ) -> String {
         let example = r#"{
   "steps": [
@@ -271,10 +275,32 @@ impl LLMBasedPlanner {
             .map(|p| format!("Project root: {}\n", p.display()))
             .unwrap_or_default();
 
+        // Build learned commands section from memory
+        let commands_section = memory.map(|m| {
+            let mut cmds = String::from("\nLearned commands for this project:\n");
+
+            if let Some(build) = m.best_command(memory::CommandType::Build) {
+                cmds.push_str(&format!("- Build: {}\n", build));
+            }
+            if let Some(test) = m.best_command(memory::CommandType::Test) {
+                cmds.push_str(&format!("- Test: {}\n", test));
+            }
+            if let Some(check) = m.best_command(memory::CommandType::Check) {
+                cmds.push_str(&format!("- Check: {}\n", check));
+            }
+
+            if cmds == "\nLearned commands for this project:\n" {
+                String::new() // No learned commands yet
+            } else {
+                cmds
+            }
+        }).unwrap_or_default();
+
         format!(
             "You are a planning engine for a code assistant.\n\
 {}\
-Relevant code context:\n{}\n\n\
+Relevant code context:\n{}\n\
+{}\
 Task type: {:?}\nUser input: {}\n\n\
 Create a plan using these step kinds:\n\
 - think: reasoning text (optional)\n\
@@ -291,12 +317,13 @@ CRITICAL RULES:\n\
 - run_terminal args MUST have {{\"cmd\": \"...\"}}, not {{\"command\": \"...\"}}\n\
 - All tool args must match the exact field names shown above\n\
 - Use file paths from the context when available\n\
+- Use learned commands when available (they are known to work)\n\
 - Return ONLY valid JSON, no markdown, no backticks\n\n\
 Constraints:\n\
 - Maximum {} steps\n\
 - Return ONLY valid JSON\n\n\
 Example output:\n{}\n",
-            repo_section, context_section, task.task_type, task.raw_input, budget.max_steps, example
+            repo_section, context_section, commands_section, task.task_type, task.raw_input, budget.max_steps, example
         )
     }
 
@@ -364,7 +391,7 @@ impl TaskPlanner for LLMBasedPlanner {
         ctx: &PlannerContext,
         events: &mut dyn crate::response::EventSink,
     ) -> error::Result<Plan> {
-        let prompt = Self::build_prompt(task, &ctx.budget, ctx.repo_root.as_deref(), &ctx.context_chunks);
+        let prompt = Self::build_prompt(task, &ctx.budget, ctx.repo_root.as_deref(), &ctx.context_chunks, ctx.memory.as_ref());
 
         let ev = RuntimeEvent::TparPlanBuilt {
             plan: "planner=llm (deepseek) request".to_owned(),
@@ -482,6 +509,7 @@ mod tests {
             },
             context_chunks: Vec::new(),
             repo_root: None,
+            memory: None,
         };
 
         // Provide two responses: first fails, second also fails (triggering fallback)
@@ -545,6 +573,7 @@ mod tests {
             },
             context_chunks: Vec::new(),
             repo_root: None,
+            memory: None,
         };
 
         let task = mk_task(TaskType::Chat, "修复项目");
@@ -591,6 +620,7 @@ mod tests {
                 },
                 context_chunks: Vec::new(),
                 repo_root: None,
+                memory: None,
             };
             let mut events = Vec::<RuntimeEvent>::new();
 

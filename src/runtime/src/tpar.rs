@@ -28,6 +28,10 @@ pub struct TurnContext {
     pub planner: Arc<dyn TaskPlanner>,
     /// Intent classifier for understanding user input
     pub intent_classifier: Arc<dyn IntentClassifier>,
+    /// Project memory (learned commands, preferences)
+    pub memory: Option<memory::ProjectMemory>,
+    /// Memory store for persistence
+    pub memory_store: Option<memory::MemoryStore>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -214,6 +218,7 @@ pub fn run_turn(
             budget: ctx.budget.clone(),
             context_chunks,
             repo_root: ctx.cwd.clone(),
+            memory: ctx.memory.clone(),
         },
         events,
     )?;
@@ -230,6 +235,8 @@ pub fn run_turn(
         ctx.trajectory,
         ctx.tools,
         ctx.budget,
+        ctx.memory.clone(),
+        ctx.memory_store.clone(),
     );
     let (out, review) = exec.execute(&plan, &task, events)?;
 
@@ -322,6 +329,10 @@ struct ActExecutor {
     budget: TokenBudget,
     // For rollback: keep original content for any edited files.
     original_files: HashMap<PathBuf, String>,
+    // Project memory for learning commands
+    memory: Option<memory::ProjectMemory>,
+    // Memory store for persistence
+    memory_store: Option<memory::MemoryStore>,
 }
 
 impl ActExecutor {
@@ -333,6 +344,8 @@ impl ActExecutor {
         trajectory: Arc<dyn TrajectoryRecorder>,
         tools: Arc<tools::ToolRegistry>,
         budget: TokenBudget,
+        memory: Option<memory::ProjectMemory>,
+        memory_store: Option<memory::MemoryStore>,
     ) -> Self {
         Self {
             session_id: session_id.to_owned(),
@@ -343,6 +356,8 @@ impl ActExecutor {
             tools,
             budget,
             original_files: HashMap::new(),
+            memory,
+            memory_store,
         }
     }
 
@@ -448,6 +463,9 @@ impl ActExecutor {
             out
         };
 
+        // Save memory before returning
+        self.save_memory();
+
         Ok((final_output, ReviewResult::Success))
     }
 
@@ -485,6 +503,8 @@ impl ActExecutor {
                 };
                 self.check_step_safety(task, &call)?;
                 let res = self.tools.run(tool_ctx, &call)?;
+                // Record to memory (Verify is likely a test command)
+                self.record_terminal_result(cmd, res.ok);
                 if res.ok {
                     Ok(StepOutcome {
                         ok: true,
@@ -512,6 +532,12 @@ impl ActExecutor {
                 }
 
                 let res = self.tools.run(tool_ctx, call)?;
+                // Record terminal commands to memory
+                if call.name == "run_terminal" {
+                    if let Some(cmd) = call.args.get("cmd").and_then(|v| v.as_str()) {
+                        self.record_terminal_result(cmd, res.ok);
+                    }
+                }
                 if res.ok {
                     Ok(StepOutcome {
                         ok: true,
@@ -520,6 +546,67 @@ impl ActExecutor {
                 } else {
                     Err(error::LunaError::invalid_input(res.stderr))
                 }
+            }
+        }
+    }
+
+    /// Record a terminal command result to memory
+    fn record_terminal_result(&mut self, cmd: &str, success: bool) {
+        use memory::CommandType;
+
+        // Infer command type from the command string
+        let cmd_type = self.infer_command_type(cmd);
+
+        if let Some(ref mut memory) = self.memory {
+            memory.record_command(cmd_type, cmd, success);
+        }
+    }
+
+    /// Infer command type from command string
+    fn infer_command_type(&self, cmd: &str) -> memory::CommandType {
+        use memory::CommandType;
+
+        let lower = cmd.to_lowercase();
+
+        // Build patterns
+        if lower.contains("build") || lower.contains("cargo build") || lower.contains("make") || lower.contains("npm run build") {
+            return CommandType::Build;
+        }
+
+        // Test patterns
+        if lower.contains("test") || lower.contains("cargo test") || lower.contains("npm test") || lower.contains("pytest") {
+            return CommandType::Test;
+        }
+
+        // Check/Lint patterns
+        if lower.contains("clippy") || lower.contains("check") || lower.contains("lint") || lower.contains("fmt") {
+            return CommandType::Check;
+        }
+
+        // Run patterns
+        if lower.contains("run") || lower.contains("start") || lower.contains("serve") {
+            return CommandType::Run;
+        }
+
+        // Install patterns
+        if lower.contains("install") || lower.contains("cargo add") || lower.contains("npm install") {
+            return CommandType::Install;
+        }
+
+        // Clean patterns
+        if lower.contains("clean") || lower.contains("cargo clean") {
+            return CommandType::Clean;
+        }
+
+        // Default to Custom
+        CommandType::Custom
+    }
+
+    /// Save memory to disk if modified
+    fn save_memory(&self) {
+        if let (Some(ref memory), Some(ref store)) = (&self.memory, &self.memory_store) {
+            if let Err(e) = store.save(memory) {
+                tracing::warn!("Failed to save project memory: {}", e);
             }
         }
     }
@@ -787,6 +874,8 @@ mod tests {
                 },
                 planner: Arc::new(crate::planner::RuleBasedPlanner::new()),
                 intent_classifier: Arc::new(crate::intent_classifier::RuleBasedClassifier::new()),
+                memory: None,
+                memory_store: None,
             },
             &mut events,
         )
@@ -834,6 +923,8 @@ mod tests {
                 },
                 planner: Arc::new(crate::planner::RuleBasedPlanner::new()),
                 intent_classifier: Arc::new(crate::intent_classifier::RuleBasedClassifier::new()),
+                memory: None,
+                memory_store: None,
             },
             &mut events,
         )
