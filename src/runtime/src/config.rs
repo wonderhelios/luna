@@ -1,3 +1,4 @@
+use crate::intent_classifier::{ClassifierConfig, ClassifierKind, IntentClassifier, RuleBasedClassifier};
 use crate::planner;
 use crate::recorder::{NoopTrajectoryRecorder, TrajectoryRecorder};
 use crate::recorder_jsonl::JsonlTrajectoryRecorder;
@@ -35,6 +36,7 @@ pub struct RuntimeConfig {
     tools: Arc<ToolRegistry>,
     budget: TokenBudget,
     planner: Arc<dyn planner::TaskPlanner>,
+    intent_classifier: Arc<dyn IntentClassifier>,
 }
 
 impl RuntimeConfig {
@@ -94,6 +96,14 @@ impl RuntimeConfig {
     pub fn planner(&self) -> Arc<dyn planner::TaskPlanner> {
         Arc::clone(&self.planner)
     }
+    pub fn intent_classifier(&self) -> Arc<dyn IntentClassifier> {
+        Arc::clone(&self.intent_classifier)
+    }
+
+    pub fn with_intent_classifier(mut self, classifier: Arc<dyn IntentClassifier>) -> Self {
+        self.intent_classifier = classifier;
+        self
+    }
 }
 
 impl Default for RuntimeConfig {
@@ -126,6 +136,20 @@ impl Default for RuntimeConfig {
         let planner: Arc<dyn planner::TaskPlanner> =
             Arc::new(planner::PlannerSelector::new(prefer_llm, rule, llm_planner));
 
+        // Initialize intent classifier based on environment
+        let classifier_config = ClassifierConfig {
+            kind: if has_llm_client {
+                ClassifierKind::Hybrid
+            } else {
+                ClassifierKind::RuleBased
+            },
+            ..Default::default()
+        };
+        let intent_classifier = crate::intent_classifier::create_classifier(
+            &classifier_config,
+            if has_llm_client { Some(Arc::clone(&llm_client)) } else { None }
+        );
+
         Self {
             session_store,
             trajectory,
@@ -133,6 +157,7 @@ impl Default for RuntimeConfig {
             tools,
             budget: TokenBudget::default(),
             planner,
+            intent_classifier,
         }
     }
 }

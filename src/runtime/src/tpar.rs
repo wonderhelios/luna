@@ -10,6 +10,7 @@ use serde_json::Value;
 use error::{LunaError, ResultExt as _};
 
 use crate::config::TokenBudget;
+use crate::intent_classifier::{ClassificationContext, Intent, IntentClassifier};
 use crate::planner::{PlannerContext, TaskPlanner};
 use crate::recorder::{TrajectoryRecorder, TrajectoryStep};
 use crate::response::{EventSink, RuntimeEvent};
@@ -25,6 +26,8 @@ pub struct TurnContext {
     pub tools: Arc<tools::ToolRegistry>,
     pub budget: TokenBudget,
     pub planner: Arc<dyn TaskPlanner>,
+    /// Intent classifier for understanding user input
+    pub intent_classifier: Arc<dyn IntentClassifier>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -68,6 +71,53 @@ impl Task {
             TaskType::Edit => "edit",
             TaskType::Terminal => "terminal",
             TaskType::Chat => "chat",
+        }
+    }
+
+    /// Create a Task from ClassificationResult (new intent classifier)
+    fn from_classification(result: &crate::intent_classifier::ClassificationResult) -> Self {
+        use crate::intent_classifier::{EntityKind, Intent};
+
+        let task_type = match &result.intent {
+            Intent::SymbolNavigation { .. } => TaskType::Query,
+            Intent::ExplainSymbol { .. } => TaskType::Explain,
+            Intent::Edit { .. } => TaskType::Edit,
+            Intent::Terminal { .. } => TaskType::Terminal,
+            Intent::Search { .. } => TaskType::Query, // Map Search to Query for now
+            Intent::Chat | Intent::Help | Intent::ClarificationNeeded { .. } => TaskType::Chat,
+        };
+
+        // Convert new entities to old CodeEntity format
+        let entities: Vec<CodeEntity> = result
+            .entities
+            .iter()
+            .map(|e| {
+                let kind = match e.kind {
+                    EntityKind::Identifier => CodeEntityKind::Identifier,
+                    EntityKind::Path => CodeEntityKind::Path,
+                    EntityKind::Line => CodeEntityKind::Line,
+                    EntityKind::Command => CodeEntityKind::Command,
+                    _ => CodeEntityKind::Identifier, // Default to Identifier for other kinds
+                };
+                CodeEntity {
+                    kind,
+                    value: e.value.clone(),
+                }
+            })
+            .collect();
+
+        // Map new Intent to old intent::Intent for backward compatibility
+        let old_intent = match &result.intent {
+            Intent::SymbolNavigation { .. } => intent::Intent::SymbolNavigation,
+            Intent::ExplainSymbol { .. } => intent::Intent::ExplainSymbol,
+            _ => intent::Intent::Other,
+        };
+
+        Self {
+            task_type,
+            raw_input: result.raw_input.clone(),
+            intent: old_intent,
+            entities,
         }
     }
 }
@@ -145,8 +195,11 @@ pub fn run_turn(
         return Ok(msg);
     }
 
-    // Task
-    let task = TaskAnalyzer::analyze(user_input);
+    // Task - using intent classifier
+    let class_ctx = ClassificationContext::with_cwd(
+        ctx.cwd.clone().unwrap_or_else(|| PathBuf::from("."))
+    );
+    let task = TaskAnalyzer::analyze(user_input, ctx.intent_classifier.as_ref(), &class_ctx);
     events.emit(&RuntimeEvent::TparTaskClassified {
         task: task.name().to_owned(),
     });
@@ -190,9 +243,15 @@ pub fn run_turn(
 struct TaskAnalyzer;
 
 impl TaskAnalyzer {
-    fn analyze(input: &str) -> Task {
+    /// Analyze user input using the provided intent classifier
+    fn analyze(
+        input: &str,
+        classifier: &dyn IntentClassifier,
+        ctx: &ClassificationContext,
+    ) -> Task {
         let raw = input.trim().to_owned();
 
+        // Priority 1: Explicit edit patterns (most specific)
         if let Some((path, line_1, new_line)) = parse_edit_line_to(input) {
             return Task {
                 task_type: TaskType::Edit,
@@ -215,6 +274,7 @@ impl TaskAnalyzer {
             };
         }
 
+        // Priority 2: Minimal edit patterns
         if let Some((path, line_1)) = parse_edit_intent_min(input) {
             return Task {
                 task_type: TaskType::Edit,
@@ -233,6 +293,7 @@ impl TaskAnalyzer {
             };
         }
 
+        // Priority 3: Terminal command patterns
         if let Some(cmd) = parse_terminal_intent(input) {
             return Task {
                 task_type: TaskType::Terminal,
@@ -245,26 +306,9 @@ impl TaskAnalyzer {
             };
         }
 
-        let inferred_intent = intent::classify_intent(input);
-        let task_type = match inferred_intent {
-            intent::Intent::SymbolNavigation => TaskType::Query,
-            intent::Intent::ExplainSymbol => TaskType::Explain,
-            intent::Intent::Other => TaskType::Chat,
-        };
-        let entities = intent::extract_identifiers_dedup(input)
-            .into_iter()
-            .take(8)
-            .map(|s| CodeEntity {
-                kind: CodeEntityKind::Identifier,
-                value: s.to_owned(),
-            })
-            .collect::<Vec<_>>();
-        Task {
-            task_type,
-            raw_input: raw,
-            intent: inferred_intent,
-            entities,
-        }
+        // Priority 4: Use intent classifier for natural language input
+        let classification = classifier.classify(input, ctx);
+        Task::from_classification(&classification)
     }
 }
 
@@ -742,6 +786,7 @@ mod tests {
                     max_steps: 8,
                 },
                 planner: Arc::new(crate::planner::RuleBasedPlanner::new()),
+                intent_classifier: Arc::new(crate::intent_classifier::RuleBasedClassifier::new()),
             },
             &mut events,
         )
@@ -788,6 +833,7 @@ mod tests {
                     max_steps: 8,
                 },
                 planner: Arc::new(crate::planner::RuleBasedPlanner::new()),
+                intent_classifier: Arc::new(crate::intent_classifier::RuleBasedClassifier::new()),
             },
             &mut events,
         )
