@@ -2,6 +2,7 @@
 
 pub mod command;
 pub mod config;
+pub mod healing;
 pub mod intent;
 pub mod intent_classifier;
 pub mod planner;

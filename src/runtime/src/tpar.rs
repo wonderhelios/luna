@@ -389,6 +389,21 @@ impl ActExecutor {
             let (ok, out_text, review) = match outcome {
                 Ok(v) => (v.ok, v.output, None),
                 Err(err) => {
+                    // Try self-healing for terminal commands
+                    if let PlanStep::ToolCall { call } = step {
+                        if call.name == "run_terminal" {
+                            if let Some(cmd) = call.args.get("cmd").and_then(|v| v.as_str()) {
+                                if let Ok(healed) = self.try_heal_command(cmd, &err) {
+                                    if healed {
+                                        // Healing succeeded, retry the step
+                                        tracing::info!("Step {step_id}: Healing succeeded, retrying");
+                                        continue;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     let reason = format!("Step {step_id} failed: {err}");
                     // If we already edited something, rollback.
                     let needs_rollback = !self.original_files.is_empty();
@@ -600,6 +615,43 @@ impl ActExecutor {
 
         // Default to Custom
         CommandType::Custom
+    }
+
+    /// Try to heal a failed command
+    fn try_heal_command(&mut self, cmd: &str, error: &error::LunaError) -> error::Result<bool> {
+        use crate::healing::{ErrorAnalyzer, HealingExecutor};
+
+        let error_str = error.to_string();
+        let analyzer = ErrorAnalyzer::new();
+        let analysis = analyzer.analyze(cmd, &error_str, None);
+
+        if analysis.pattern == crate::healing::ErrorPattern::Unknown {
+            return Ok(false);
+        }
+
+        tracing::info!("Attempting to heal error: {:?}", analysis.pattern);
+
+        let mut executor = HealingExecutor::new();
+        // Note: We'd need to implement HealingContext for ActExecutor to make this fully work
+        // For now, just log the healing attempt
+
+        // Try simple healing strategies that don't require context
+        for strategy in &analysis.strategies {
+            match strategy {
+                crate::healing::HealingStrategy::CreateDirectory { path } => {
+                    tracing::info!("Healing: Creating directory {}", path);
+                    if std::fs::create_dir_all(path).is_ok() {
+                        return Ok(true);
+                    }
+                }
+                _ => {
+                    // Other strategies require more complex handling
+                    tracing::debug!("Healing strategy not yet implemented: {:?}", strategy);
+                }
+            }
+        }
+
+        Ok(false)
     }
 
     /// Save memory to disk if modified

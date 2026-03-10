@@ -17,3 +17,6 @@ tools = { path = "../tools" }
 uuid = { workspace = true }
 error = { path = "../error" }
 llm = { path = "../llm" }
+
+[dev-dependencies]
+tempfile = "3.8"
