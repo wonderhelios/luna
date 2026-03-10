@@ -102,6 +102,13 @@ impl ContextChunk {
         self.relevance_score = score.clamp(0.0, 1.0);
     }
 
+    /// Set relevance score (builder style)
+    #[must_use]
+    pub fn with_relevance(mut self, score: f32) -> Self {
+        self.relevance_score = score.clamp(0.0, 1.0);
+        self
+    }
+
     /// Format this chunk for inclusion in a prompt
     #[must_use]
     pub fn format_for_prompt(&self) -> String {

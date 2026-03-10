@@ -29,6 +29,12 @@ pub enum LunaError {
         source: std::io::Error,
     },
 
+    #[error("network error: {0}")]
+    Network(String),
+
+    #[error("timeout: {0}")]
+    Timeout(String),
+
     #[error(transparent)]
     SerdeJson(#[from] serde_json::Error),
 
@@ -59,6 +65,16 @@ impl LunaError {
     #[must_use]
     pub fn internal(message: impl Into<String>) -> Self {
         Self::Internal(message.into())
+    }
+
+    #[must_use]
+    pub fn network(message: impl Into<String>) -> Self {
+        Self::Network(message.into())
+    }
+
+    #[must_use]
+    pub fn timeout(message: impl Into<String>) -> Self {
+        Self::Timeout(message.into())
     }
 
     #[must_use]

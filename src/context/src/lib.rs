@@ -14,12 +14,14 @@ pub mod context_chunk;
 pub mod index_chunk;
 pub mod query;
 pub mod refill;
+pub mod vector;
 
 pub use cache::ContextCache;
 pub use context_chunk::{ContextChunk, ContextType};
 pub use index_chunk::{IndexChunk, IndexChunkType};
 pub use query::ContextQuery;
 pub use refill::RefillPipeline;
+pub use vector::{SemanticRetriever, SemanticSearchOptions};
 
 /// Unique identifier for chunks
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
