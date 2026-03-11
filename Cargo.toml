@@ -1,28 +1,50 @@
 [workspace]
 resolver = "2"
 members = [
-    "src/core",
-    "src/error",
-    "src/llm",
-    "src/intelligence",
-    "src/context",
-    "src/memory",
-    "src/tools",
-    "src/session",
-    "src/runtime",
-    "src/cli",
+    "crates/error",
+    "crates/intelligence",
 ]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
 
 [workspace.dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio = { version = "1.0", features = ["full"] }
 tracing = "0.1"
-uuid = { version = "1.18", features = ["v4"] }
-parking_lot = "0.12"
-ratatui = "0.29"
-crossterm = { version = "0.28", features = ["event-stream"] }
-futures-util = "0.3"
-unicode-width = "0.2"
+tracing-subscriber = "0.3"
 thiserror = "2.0"
+
+# Bin package
+[package]
+name = "luna"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "luna"
+path = "src/main.rs"
+
+[dependencies]
+# Async
+tokio = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# HTTP
 reqwest = { version = "0.12", features = ["json"] }
+
+# Error handling
+thiserror = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Workspace crates
+error = { path = "crates/error" }
+intelligence = { path = "crates/intelligence" }
